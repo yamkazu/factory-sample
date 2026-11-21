@@ -66,6 +66,10 @@ jobs:
       - name: Move to Review
         id: prepare
         if: steps.creds.outputs.ok == 'true'
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           # The checked-out PR head may not contain the factory files (e.g. human PRs
           # branched before the factory existed), so load the helpers from the base branch.
@@ -98,6 +102,9 @@ jobs:
       - name: Hand off and route
         if: always() && steps.prepare.outcome == 'success'
         env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
           HEAD_SHA: ${{ steps.prepare.outputs.head }}
         run: |
           source /tmp/factory-lib.sh

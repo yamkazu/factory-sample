@@ -44,7 +44,7 @@ Done                       PR と Issue に factory:done（同じ Issue の PR �
 
 | Mastra Factory | このリポジトリ |
 | --- | --- |
-| Work board / Review board のステージ | ステージラベル `factory:intake` 〜 `factory:done`（Issue と PR に常に1つ） |
+| Work board / Review board（カンバン画面） | GitHub Projects のボード（`Stage` 列）。ステージラベル `factory:intake` 〜 `factory:done` から自動で同期 |
 | ステージごとのスキル（`factory-skills/factory-*/SKILL.md`） | [`.claude/skills/factory-*/SKILL.md`](.claude/skills)（triage / plan / build / self-review / review / fix） |
 | `factory-phase` シグナル | 各エージェントへのプロンプト先頭の `factory-phase:` |
 | 型付きの遷移（`factory_transition_work_item` / `factory_record_review_verdict`） | エージェントは `.factory-tmp/result.json` を書くだけ。ワークフローが [`lib.sh`](.github/factory/lib.sh) の `accept_handoff` で検証してからラベル・コメント・次ステージを動かす。不正なら境界で止めて `factory:needs-human` |
@@ -58,7 +58,27 @@ Done                       PR と Issue に factory:done（同じ Issue の PR �
 | 計画の保存 `.artifacts/plans/issue-N.md` | Building が同じパスにコミット |
 | エージェントの指示を承認する（すべての PR ではなく） | スキルはリポジトリ内にあり、変更は PR でレビュー |
 
-省略しているもの: Linear / Slack / Jira 連携、監視ループ（Sentry → Triage）、ドキュメントのずれ検出、アプリのプレビュー、画面を使った確認。
+省略しているもの: ボード上でカードを動かしてステージを進める操作（ラベルで行います）、Linear / Slack / Jira 連携、監視ループ（Sentry → Triage）、ドキュメントのずれ検出、アプリのプレビュー、画面を使った確認。
+
+## カンバン（GitHub Projects）
+
+Mastra Factory のボード画面の代わりに、GitHub Projects のボードを使います。
+ステージが変わるたびに、ワークフローが Issue / PR をプロジェクトに追加し、`Stage` 列（Intake / Triage / Planning / Building / Self-review / Review / Done）を更新します。
+ボードは表示用で、正しい状態はラベルです。ボードの更新に失敗してもファクトリーは止まりません（警告だけ出ます）。
+ボード上でカードを動かしてもステージは変わりません。ステージを進めるのはゲートのラベルです。
+
+セットアップ:
+
+1. `gh auth refresh -s project` で、手元の `gh` に project スコープを付ける。
+2. `scripts/setup-board.sh` を実行する。プロジェクト「Factory」と `Stage` フィールドを作り、リポジトリにリンクします（何度実行しても大丈夫です）。
+3. 表示された番号をリポジトリ変数 `FACTORY_PROJECT_NUMBER` に設定する。
+4. シークレット `FACTORY_PROJECT_TOKEN` を追加する。`GITHUB_TOKEN` では Projects を操作できないためです。
+   - 個人アカウントのプロジェクト: **classic PAT** に `project` と `repo` スコープ
+   - Organization のプロジェクト: fine-grained PAT（Organization の Projects: Read and write、リポジトリの Issues / Pull requests: Read）か GitHub App のトークン
+5. プロジェクトを開き、ビューを **Board** にして **Column by: Stage** を選ぶ。
+   Mastra のように Work board と Review board を分けるなら、フィルタ `is:issue` と `is:pr` のビューを2つ作る。
+
+トークンはラベルを操作するステップにだけ渡し、エージェントのステップには渡しません。
 
 ## ラベル
 
@@ -92,8 +112,9 @@ Done                       PR と Issue に factory:done（同じ Issue の PR �
 2. Settings → Actions → General → Workflow permissions を **Read and write** にし、
    **Allow GitHub Actions to create and approve pull requests** にチェックを入れる。
 3. `gh auth login` 済みの手元の環境で `scripts/setup-labels.sh` を実行し、ラベルを作る（何度実行しても大丈夫です。別のリポジトリなら `scripts/setup-labels.sh owner/repo`）。
-4. `@claude` メンションを使う場合は [Claude GitHub App](https://github.com/apps/claude) をインストールする。
-5. [`CLAUDE.md`](CLAUDE.md) の「チェック」にテストなどのコマンドを書き、`factory-build.yml` / `factory-fix.yml` にツールチェーンのセットアップを追加する。
+4. （任意）カンバンを使う場合は、上の「カンバン（GitHub Projects）」の手順を行う。
+5. `@claude` メンションを使う場合は [Claude GitHub App](https://github.com/apps/claude) をインストールする。
+6. [`CLAUDE.md`](CLAUDE.md) の「チェック」にテストなどのコマンドを書き、`factory-build.yml` / `factory-fix.yml` にツールチェーンのセットアップを追加する。
 
 任意のリポジトリ変数:
 
@@ -105,6 +126,8 @@ Done                       PR と Issue に factory:done（同じ Issue の PR �
 | `FACTORY_MODEL` | ステージ別の既定 | 全ステージのモデル |
 | `FACTORY_MODEL_TRIAGE` | `claude-sonnet-5-5` | Triage のモデル |
 | `FACTORY_MODEL_PLAN` / `_BUILD` / `_REVIEW` | `claude-opus-5-5` | ステージ別のモデル |
+| `FACTORY_PROJECT_NUMBER` | なし | カンバンにするプロジェクトの番号（設定するとボード同期が有効） |
+| `FACTORY_PROJECT_OWNER` | リポジトリの持ち主 | プロジェクトの持ち主 |
 | `FACTORY_CHECK_TOOLS` | npm / pytest / make など | エージェントが実行してよいチェック用コマンド |
 
 ## 使い方

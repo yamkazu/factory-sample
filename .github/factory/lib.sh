@@ -14,6 +14,37 @@ set_stage() {
   local kind=$1 n=$2 stage=$3 s args=()
   for s in $FACTORY_STAGES; do [ "$s" = "$stage" ] || args+=(--remove-label "$s"); done
   gh "$kind" edit "$n" -R "$GITHUB_REPOSITORY" --add-label "$stage" "${args[@]}" >/dev/null
+  board_sync "$kind" "$n" "$stage"
+}
+
+# board_sync <issue|pr> <number> <stage-label>
+# Mirror the stage onto the GitHub Projects board (Mastra's kanban). Optional: runs only
+# when FACTORY_PROJECT_TOKEN and FACTORY_PROJECT_NUMBER are set. Labels stay the source of
+# truth, so a board failure is only a warning.
+board_sync() {
+  [ -n "${FACTORY_PROJECT_TOKEN:-}" ] && [ -n "${FACTORY_PROJECT_NUMBER:-}" ] || return 0
+  _board_sync "$@" || echo "::warning::Project board sync failed for $1 #$2 ($3). Labels are still correct."
+}
+
+_board_sync() {
+  local kind=$1 n=$2 stage=$3 option path url item meta pid fid oid
+  local owner=${FACTORY_PROJECT_OWNER:-${GITHUB_REPOSITORY%%/*}} num=$FACTORY_PROJECT_NUMBER
+  case "$stage" in
+    factory:intake) option=Intake ;;        factory:triage) option=Triage ;;
+    factory:planning) option=Planning ;;    factory:building) option=Building ;;
+    factory:self-review) option=Self-review ;; factory:review) option=Review ;;
+    factory:done) option=Done ;;            *) return 1 ;;
+  esac
+  [ "$kind" = pr ] && path=pull || path=issues
+  url="https://github.com/$GITHUB_REPOSITORY/$path/$n"
+  item=$(GH_TOKEN=$FACTORY_PROJECT_TOKEN gh project item-add "$num" --owner "$owner" --url "$url" --format json --jq .id) || return 1
+  pid=$(GH_TOKEN=$FACTORY_PROJECT_TOKEN gh project view "$num" --owner "$owner" --format json --jq .id) || return 1
+  meta=$(GH_TOKEN=$FACTORY_PROJECT_TOKEN gh project field-list "$num" --owner "$owner" --format json) || return 1
+  fid=$(jq -r '.fields[] | select(.name == "Stage") | .id' <<<"$meta")
+  oid=$(jq -r --arg o "$option" '.fields[] | select(.name == "Stage") | .options[] | select(.name == $o) | .id' <<<"$meta")
+  [ -n "$fid" ] && [ -n "$oid" ] || return 1
+  GH_TOKEN=$FACTORY_PROJECT_TOKEN gh project item-edit --id "$item" --project-id "$pid" \
+    --field-id "$fid" --single-select-option-id "$oid" >/dev/null
 }
 
 add_label()    { gh "$1" edit "$2" -R "$GITHUB_REPOSITORY" --add-label "$3" >/dev/null; }

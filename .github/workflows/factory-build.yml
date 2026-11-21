@@ -48,6 +48,10 @@ jobs:
 
       - name: Move to Building
         id: prepare
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           set_stage issue "$ISSUE" factory:building
@@ -85,6 +89,10 @@ jobs:
       - name: Hand off from Building
         id: built
         if: always() && steps.prepare.outcome == 'success'
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           accept_handoff issue "$ISSUE" built replan
@@ -124,6 +132,10 @@ jobs:
       - name: Hand off from Self-review
         id: sr1
         if: always() && steps.built.outputs.next == 'self-review'
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           accept_handoff issue "$ISSUE" approve request-changes
@@ -153,6 +165,10 @@ jobs:
       - name: Hand off from Building (fix)
         id: fixed
         if: always() && steps.sr1.outputs.verdict == 'request-changes'
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           accept_handoff issue "$ISSUE" built
@@ -181,6 +197,10 @@ jobs:
       - name: Hand off from Self-review (round 2)
         id: sr2
         if: always() && steps.fixed.outcome == 'success'
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           accept_handoff issue "$ISSUE" approve request-changes
@@ -191,6 +211,9 @@ jobs:
       - name: Open PR and move to Review
         if: steps.sr1.outputs.verdict == 'approve' || steps.sr2.outcome == 'success'
         env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
           FINAL: ${{ steps.sr2.outputs.verdict || steps.sr1.outputs.verdict }}
         run: |
           source .github/factory/lib.sh

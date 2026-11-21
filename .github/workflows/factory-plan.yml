@@ -42,6 +42,10 @@ jobs:
 
       - name: Move to Planning
         id: prepare
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           set_stage issue "$ISSUE" factory:planning
@@ -66,6 +70,10 @@ jobs:
 
       - name: Hand off
         if: always() && steps.prepare.outcome == 'success'
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           accept_handoff issue "$ISSUE" planned

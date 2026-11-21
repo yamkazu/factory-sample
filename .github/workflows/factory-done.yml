@@ -24,7 +24,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
-      - run: |
+      - name: Move to Done
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
+        run: |
           source .github/factory/lib.sh
           set_stage pr "$PR" factory:done
           remove_label pr "$PR" factory:approved factory:running factory:waiting

@@ -43,6 +43,9 @@ jobs:
       - name: Put the issue on the board
         id: intake
         env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
           AUTO_START: ${{ vars.FACTORY_AUTO_START || 'false' }}
           TRUSTED: ${{ contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) }}
         run: |
@@ -78,6 +81,10 @@ jobs:
 
       - name: Move to Triage
         id: prepare
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           set_stage issue "$ISSUE" factory:triage
@@ -103,6 +110,9 @@ jobs:
       - name: Hand off
         if: always() && steps.prepare.outcome == 'success'
         env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
           AUTO_ACCEPT: ${{ vars.FACTORY_AUTO_ACCEPT || 'false' }}
         run: |
           source .github/factory/lib.sh

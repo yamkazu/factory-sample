@@ -45,6 +45,10 @@ jobs:
 
       - name: Prepare
         id: prepare
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
         run: |
           source .github/factory/lib.sh
           add_label pr "$PR" factory:running
@@ -73,6 +77,9 @@ jobs:
       - name: Hand off back to Review
         if: always() && steps.prepare.outcome == 'success'
         env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+          FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
           BRANCH: ${{ steps.pr.outputs.branch }}
         run: |
           source .github/factory/lib.sh
