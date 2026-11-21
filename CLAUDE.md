@@ -1,6 +1,6 @@
 # エージェント向けプロジェクトガイド
 
-ファクトリーのすべてのスキル（triage / plan / build / self-review / review / fix）がこのファイルを読みます。
+ファクトリーのすべてのスキル（refine / implement / merge-confidence / fix-checks / pr-feedback）がこのファイルを読みます。
 短く正確に保ってください。ファクトリーの出力の質を一番左右するファイルです。
 
 ## 規約
@@ -9,10 +9,14 @@
 - ファクトリーの手順は `.claude/skills/factory-*/SKILL.md` にある。手順を変えるときはスキルを PR で変更する。
 
 ## チェック
-Building / Self-review / Review / Fix が実行するコマンドを書いてください。
+実装・修正・評価のエージェントが実行するコマンドを書いてください。
 <!-- 例:
 - `npm ci`
 - `npm run lint`
 - `npm test`
 -->
 - （まだコードが無いため、実行するチェックはありません）
+
+## 性能の慣習
+マージ確信度の performance チェックは、ここに書かれた慣習とコードの既存の型だけを基準にします。
+- （まだありません）

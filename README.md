@@ -1,146 +1,138 @@
 # factory-sample
 
-[Mastra Factory](https://factory.mastra.ai/what-is-factory)（[解説記事](https://mastra.ai/blog/software-factory)）の流れと仕組みを参考にした、
 **GitHub Actions だけで動くソフトウェアファクトリー**のサンプルです。
+流れと仕組みは [SuperPlane](https://github.com/superplanehq/superplane)（オープンソースのソフトウェアファクトリー）の公式実装に合わせています。
 
-Issue は Mastra Factory と同じステージ（Intake → Triage → Planning → Building → Self-review → Review → Done）を流れます。
-各ステージは独立したエージェント実行（[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)）で、
-手順は [`.claude/skills/`](.claude/skills) のスキル（日本語）に書かれています。人間が持つゲートは「開始」「受け入れ」「計画の承認」「マージ」です。
+Issue をバックログでリファインメント（採点と仕様づくり）し、人が着手を決めると、エージェントが1回の実行で実装して PR を出します。
+PR では CI を待って失敗を自動修正し（上限3回）、マージ確信度を報告します。マージするかは人が決めます。
+各ステップは毎回新しいエージェント実行（[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)）で、
+手順は [`.claude/skills/`](.claude/skills) のスキル（日本語）に書かれています。
 
 ## 流れ
 
 ```
-Issue 作成
-  │  factory:intake        ボードに載るだけ。まだ何も動かない
+Issue に factory ラベル                         ◆ 人: ファクトリーに渡す
+  ▼
+Backlog    factory-refine: Clarity / Complexity / Verifiability を 1〜3 で採点し、仕様を書く
+  │        確信度 = 3つの最小値（confidence:1〜3 ラベル）。必要なときだけ質問する
+  │        `/factory ...` コメントで回答・相談・計画の更新（毎回新しい実行が Issue の計画を読み直す）
   │
-  │  ◆ 人間: factory:start を付ける（FACTORY_AUTO_START=true なら信頼できる作成者の Issue は自動）
+  │  ◆ 人: factory:start を付けて着手（FACTORY_AUTO_DISPATCH=true なら確信度 3・質問なしで自動）
   ▼
-Triage                     factory-triage スキル: 履歴調査・根本原因・種類/深刻度/確信度/工数
-  │  needs-info ─► 報告者がコメント ─► 再 Triage
-  │  ready
-  │  ├─ bug ─────────────────────────► 自動で Planning へ
-  │  └─ それ以外 ◆ 人間: factory:plan を付けて受け入れる
+Implement  factory-implement: 仕様どおりに factory/issue-N で実装・テスト・プッシュ（1回の実行）
+  │        ワークフローが PR を作成（Closes #N を付与）
   ▼
-Planning                   factory-plan スキル: フェーズ別の計画・採用しなかった案・前提
-  │  ◆ 人間: factory:build を付けて計画を承認（やり直しはコメント + factory:plan）
+Verify     PR が開く・コミットが増えるたびに:
+  │        ├ merge-confidence: risk / security / drift / reversibility / performance を 1〜5 で採点し、
+  │        │  1つのコメントとコミットステータスで報告。競合は検知して報告のみ（自動解消しない）
+  │        │  着手した人にレビューを依頼
+  │        └ checks: CI の完了を待ち、失敗したら factory-fix-checks で自動修正（PR ごとに最大3回）
+  │        `/factory ...` を PR のコメント・レビューに書くと factory-pr-feedback が対応（メンション時のみ）
+  │
+  │  ◆ 人: レビューしてマージ
   ▼
-Building                   factory-build スキル: 実装・回帰テスト・チェック・プッシュ（PR はまだ作らない）
-  │  計画が誤っていた ─► Planning に差し戻し
-  ▼
-Self-review                factory-self-review スキル: 別セッションでブランチをレビュー
-  │  request-changes ─► Building（修正モード）─► Self-review（1回まで）
-  ▼
-PR 作成（Issue のタイトル、Closes #N）
-  ▼
-Review                     factory-review スキル: 独立したセッションで PR をレビュー
-  │  request-changes ─► factory-fix スキル ─► 再レビュー（FACTORY_MAX_FIX_ROUNDS 回まで、超えたら needs-human）
-  │  approve
-  │  ◆ 人間: マージ
-  ▼
-Done                       PR と Issue に factory:done（同じ Issue の PR が他に開いていれば待つ）
+Done       PR と Issue に factory:done（マージせずに閉じたら Issue は Backlog に戻る）
 ```
 
-## Mastra Factory との対応
+## SuperPlane との対応
 
-| Mastra Factory | このリポジトリ |
+| SuperPlane（公式ソース） | このリポジトリ |
 | --- | --- |
-| Work board / Review board（カンバン画面） | GitHub Projects のボード（`Stage` 列）。ステージラベル `factory:intake` 〜 `factory:done` から自動で同期 |
-| ステージごとのスキル（`factory-skills/factory-*/SKILL.md`） | [`.claude/skills/factory-*/SKILL.md`](.claude/skills)（triage / plan / build / self-review / review / fix） |
-| `factory-phase` シグナル | 各エージェントへのプロンプト先頭の `factory-phase:` |
-| 型付きの遷移（`factory_transition_work_item` / `factory_record_review_verdict`） | エージェントは `.factory-tmp/result.json` を書くだけ。ワークフローが [`lib.sh`](.github/factory/lib.sh) の `accept_handoff` で検証してからラベル・コメント・次ステージを動かす。不正なら境界で止めて `factory:needs-human` |
-| セッションごとのサンドボックス | ステージごとに新しい GitHub ホストランナー |
-| 作成とは別のレビューセッション | Self-review と Review はそれぞれ新しいエージェント実行 |
-| レビューの指摘は作成側に戻る | `factory-fix` が直して再レビュー。`@claude` メンションで人間も直接指示できる |
-| Review の結果に `Reviewed head` | `result.json` の `reviewed_head` が PR のヘッドと一致しないと受け付けない |
-| 人間ゲート: 開始・受け入れ（bug 以外）・計画承認・マージ | `factory:start`・`factory:plan`・`factory:build`・通常のマージ |
-| ステージの自動開始（条件を満たすアイテム） | `FACTORY_AUTO_START` / `FACTORY_AUTO_ACCEPT` |
-| ステージごとのモデル指定 | `FACTORY_MODEL_TRIAGE` / `_PLAN` / `_BUILD` / `_REVIEW` |
-| 計画の保存 `.artifacts/plans/issue-N.md` | Building が同じパスにコミット |
-| エージェントの指示を承認する（すべての PR ではなく） | スキルはリポジトリ内にあり、変更は PR でレビュー |
+| ボードの列 Backlog / Implement / Verify / Done | ステージラベル `factory:backlog` 〜 `factory:done`、任意で GitHub Projects ボード（表示専用） |
+| Ingest: `factory` ラベルで Work Order を作成 | `factory` ラベルで Backlog に入り、リファインメント開始 |
+| Backlog リファインメント（Clarity / Complexity / Verifiability、確信度は最小値、質問は人にしか決められないことだけ） | `factory-refine` スキル。計画ターン / 回答ターンの区別も同じ |
+| Dispatch → Implement line（1回の実行、質問しない、前提は PR に書く） | `factory:start` → `factory-implement` スキル |
+| Fix pull request checks（チェックを待ち、失敗したら1回の修正実行。上限は既定3回、待機は回数を消費しない） | `factory-verify.yml` の checks ジョブ → `factory-fix-checks.yml` |
+| Address PR feedback（`@superplaneagent` メンション時のみ） | `/factory` で始まるコメント・レビューのみ（GitHub のメンション通知を避けるためスラッシュ形式） |
+| Merge confidence（PR が開く・更新されるたびに risk / performance / security / drift / reversibility） | `factory-merge-confidence` スキル。古いヘッドの結果は公開しない |
+| 競合はマージ可否の判定でブロックするだけ | `factory:conflict` ラベルとレポートで知らせるだけ |
+| Review request（レビュアーを選ぶ） | 着手した人（`factory:start` を付けた人）にレビューを依頼する簡略版 |
+| 人がマージ、PR closure で Work Order を閉じる | 人がマージ、`factory-closure.yml` で Done |
+| 毎回新しい会話。経緯は Work Order のコメント・成果物・ブランチ・PR から渡す | 同じ。Issue の計画コメント、PR 本文、ブランチ、失敗ログ、レビューコメントを渡す |
+| 構造化された結果を読み取りステップで検証 | エージェントは `.factory-tmp/result.json` を書くだけ。ワークフローが [`lib.sh`](.github/factory/lib.sh) で検証してから GitHub を更新 |
 
-省略しているもの: ボード上でカードを動かしてステージを進める操作（ラベルで行います）、Linear / Slack / Jira 連携、監視ループ（Sentry → Triage）、ドキュメントのずれ検出、アプリのプレビュー、画面を使った確認。
+### 以前の Mastra 寄りの設計から残したもの・やめたもの
 
-## カンバン（GitHub Projects）
-
-Mastra Factory のボード画面の代わりに、GitHub Projects のボードを使います。
-ステージが変わるたびに、ワークフローが Issue / PR をプロジェクトに追加し、`Stage` 列（Intake / Triage / Planning / Building / Self-review / Review / Done）を更新します。
-ボードは**表示専用（読み取り専用）**で、正しい状態はラベルです。ボードの更新に失敗してもファクトリーは止まりません（警告だけ出ます）。
-**ボード上でカードを動かしてもステージは進みません。**操作は Issue / PR のゲートラベル（`factory:start` / `factory:plan` / `factory:build`）で行います。
-
-セットアップ:
-
-1. `gh auth refresh -s project` で、手元の `gh` に project スコープを付ける。
-2. `scripts/setup-board.sh` を実行する。プロジェクト「Factory」と `Stage` フィールドを作り、リポジトリにリンクします（何度実行しても大丈夫です）。
-3. 表示された番号をリポジトリ変数 `FACTORY_PROJECT_NUMBER` に設定する。
-4. シークレット `FACTORY_PROJECT_TOKEN` を追加する。`GITHUB_TOKEN` では Projects を操作できないためです。
-   - 個人アカウントのプロジェクト: **classic PAT** に `project` と `repo` スコープ
-   - Organization のプロジェクト: fine-grained PAT（Organization の Projects: Read and write、リポジトリの Issues / Pull requests: Read）か GitHub App のトークン
-5. プロジェクトを開き、ビューを **Board** にして **Column by: Stage** を選ぶ。
-   Mastra のように Work board と Review board を分けるなら、フィルタ `is:issue` と `is:pr` のビューを2つ作る。
-
-トークンはラベルを操作するステップにだけ渡し、エージェントのステップには渡しません。
+- **残した**: スキルを `.claude/skills/` に置く形、型付きの引き継ぎ（エージェントは GitHub に書き込まない）、ラベル = 状態の正、表示専用のボード同期。
+- **やめた**: Triage と Planning の分離（SuperPlane のリファインメント1つに統合）、Self-review ステージ、エージェント同士の Review ⇄ Fix ループ（CI の自動修正とマージ確信度の報告に置き換え、判断は人）、bug 以外の受け入れゲート（確信度と `factory:start` に置き換え）、`@claude` 汎用アシスト（`/factory` に統一）。
 
 ## ラベル
 
 | 種類 | ラベル |
 | --- | --- |
-| ステージ | `factory:intake` `factory:triage` `factory:planning` `factory:building` `factory:self-review` `factory:review` `factory:done` |
-| 人間ゲート（付けると進む） | `factory:start` `factory:plan` `factory:build` |
-| 状態 | `factory:running` `factory:waiting` `factory:needs-info` `factory:needs-human` `factory:approved` `factory:changes-requested` |
-| 仕分け結果 | `type:bug` `type:feature` `type:chore` `type:docs` |
-| ファクトリーが作った PR | `factory` |
-
-エージェントは GitHub に書き込みません（読み取り系の `gh` だけ許可）。ラベルとコメントは、引き継ぎを検証したワークフローが付けます。
+| ステージ | `factory:backlog` `factory:implement` `factory:verify` `factory:done` |
+| 人の操作 | `factory`（ファクトリーに渡す）、`factory:start`（着手） |
+| 状態 | `factory:running` `factory:needs-human` `factory:needs-review` `factory:conflict` |
+| 確信度 | `confidence:1` `confidence:2` `confidence:3` |
 
 ## ワークフロー
 
-| ファイル | きっかけ | ステージ |
+| ファイル | きっかけ | 役割 |
 | --- | --- | --- |
-| `factory-intake-triage.yml` | Issue 作成、`factory:start`、needs-info への返信 | Intake → Triage |
-| `factory-plan.yml` | `factory:plan`、bug の自動受け入れ、Building からの差し戻し | Planning |
-| `factory-build.yml` | `factory:build` | Building → Self-review → PR 作成 |
-| `factory-review.yml` | Building / Fix からの起動、人間が開いた PR | Review |
-| `factory-fix.yml` | Review からの起動 | Review（修正） |
-| `factory-done.yml` | ファクトリーの PR がマージされた | Done |
-| `factory-assist.yml` | コメントの `@claude` | 人間との対話 |
-
-`GITHUB_TOKEN` で行った操作は他のワークフローを起動しないため、ステージ間は `workflow_dispatch` で明示的につないでいます。
+| `factory-refine.yml` | `factory` ラベル、Backlog の Issue への `/factory` コメント | Backlog のリファインメント |
+| `factory-implement.yml` | `factory:start`、自動ディスパッチ | 実装して PR を作る |
+| `factory-verify.yml` | PR の作成・更新、ファクトリーのプッシュ後 | マージ確信度、CI 待ちと自動修正の起動 |
+| `factory-fix-checks.yml` | verify から起動 | 失敗したチェックの修正 |
+| `factory-pr-feedback.yml` | PR の `/factory` コメント・レビュー | フィードバック対応 |
+| `factory-closure.yml` | ファクトリーの PR が閉じた | Done / Backlog に戻す |
 
 ## セットアップ
 
-1. リポジトリのシークレットに `ANTHROPIC_API_KEY` か `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token` で取得）のどちらかを追加する。
+1. リポジトリのシークレットに `ANTHROPIC_API_KEY` か `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token` で取得）を追加する。
 2. Settings → Actions → General → Workflow permissions を **Read and write** にし、
    **Allow GitHub Actions to create and approve pull requests** にチェックを入れる。
-3. `gh auth login` 済みの手元の環境で `scripts/setup-labels.sh` を実行し、ラベルを作る（何度実行しても大丈夫です。別のリポジトリなら `scripts/setup-labels.sh owner/repo`）。
-4. （任意）カンバンを使う場合は、上の「カンバン（GitHub Projects）」の手順を行う。
-5. `@claude` メンションを使う場合は [Claude GitHub App](https://github.com/apps/claude) をインストールする。
-6. [`CLAUDE.md`](CLAUDE.md) の「チェック」にテストなどのコマンドを書き、`factory-build.yml` / `factory-fix.yml` にツールチェーンのセットアップを追加する。
+3. `gh auth login` 済みの手元で `scripts/setup-labels.sh` を実行してラベルを作る（何度実行しても大丈夫）。
+4. **GitHub App のトークン（推奨）**: `GITHUB_TOKEN` で行ったプッシュや PR では CI が動かないため、CI の結果を待って直すには App が必要です。
+   1. Settings → Developer settings → GitHub Apps → New GitHub App で App を作る（Webhook はオフで可）。
+      Repository permissions: **Contents: Read and write**、**Pull requests: Read and write**、**Issues: Read and write**、**Workflows: Read and write**（ワークフローファイルを変更する場合のみ）。
+   2. App をこのリポジトリにインストールする。
+   3. リポジトリ変数 `FACTORY_APP_ID` に App ID、シークレット `FACTORY_APP_PRIVATE_KEY` に秘密鍵（.pem の中身）を設定する。
+
+   設定しない場合も動きますが、ファクトリーのプッシュでは CI が走らないため、CI の自動修正は実質働きません（マージ確信度はワークフローから直接起動します）。
+5. （任意）カンバンを使う場合は、下の「カンバン（GitHub Projects）」の手順を行う。
+6. [`CLAUDE.md`](CLAUDE.md) の「チェック」にテストなどのコマンドを書き、`factory-implement.yml` / `factory-fix-checks.yml` / `factory-pr-feedback.yml` にツールチェーンのセットアップを追加する。
 
 任意のリポジトリ変数:
 
 | 変数 | 既定値 | 用途 |
 | --- | --- | --- |
-| `FACTORY_AUTO_START` | `false` | `true` なら OWNER / MEMBER / COLLABORATOR が作った Issue は自動で Triage 開始 |
-| `FACTORY_AUTO_ACCEPT` | `false` | `true` なら bug 以外も受け入れゲートを飛ばして Planning へ |
-| `FACTORY_MAX_FIX_ROUNDS` | `2` | Review ⇄ Fix の最大回数 |
-| `FACTORY_MODEL` | ステージ別の既定 | 全ステージのモデル |
-| `FACTORY_MODEL_TRIAGE` | `claude-sonnet-5-5` | Triage のモデル |
-| `FACTORY_MODEL_PLAN` / `_BUILD` / `_REVIEW` | `claude-opus-5-5` | ステージ別のモデル |
-| `FACTORY_PROJECT_NUMBER` | なし | カンバンにするプロジェクトの番号（設定するとボード同期が有効） |
-| `FACTORY_PROJECT_OWNER` | リポジトリの持ち主 | プロジェクトの持ち主 |
+| `FACTORY_AUTO_DISPATCH` | `false` | `true` なら確信度 3 で質問のない計画は自動で実装開始 |
+| `FACTORY_MAX_FIX_ATTEMPTS` | `3` | PR ごとの CI 自動修正の上限 |
+| `FACTORY_CHECKS_TIMEOUT_MINUTES` | `60` | CI の完了を待つ時間 |
+| `FACTORY_REQUIRED_CHECKS` | すべて | 待つ・直す対象のチェック名（カンマ区切り）。`Factory:` で始まるワークフローは常に除外 |
+| `FACTORY_APP_ID` | なし | GitHub App の ID（上記） |
+| `FACTORY_MODEL` | ステージ別の既定 | 全ステップのモデル |
+| `FACTORY_MODEL_REFINE` / `_IMPLEMENT` / `_VERIFY` | `claude-opus-5-5` | ステップ別のモデル |
 | `FACTORY_CHECK_TOOLS` | npm / pytest / make など | エージェントが実行してよいチェック用コマンド |
+| `FACTORY_PROJECT_NUMBER` / `FACTORY_PROJECT_OWNER` | なし | カンバン用（下記） |
+
+## カンバン（GitHub Projects）
+
+ステージが変わるたびに、ワークフローが Issue / PR を GitHub Projects のボードに追加し、`Stage` 列（Backlog / Implement / Verify / Done）を更新します。
+ボードは**表示専用（読み取り専用）**で、正しい状態はラベルです。更新に失敗してもファクトリーは止まりません（警告だけ）。
+**ボード上でカードを動かしてもステージは進みません。** 操作はラベル（`factory` / `factory:start`）とマージで行います。
+
+1. `gh auth refresh -s project` で、手元の `gh` に project スコープを付ける。
+2. `scripts/setup-board.sh` を実行する（プロジェクト「Factory」と `Stage` フィールドを作り、リポジトリにリンク）。
+3. 表示された番号をリポジトリ変数 `FACTORY_PROJECT_NUMBER` に設定する。
+4. シークレット `FACTORY_PROJECT_TOKEN` を追加する（`GITHUB_TOKEN` では Projects を操作できないため）。
+   - 個人アカウントのプロジェクト: **classic PAT** に `project` と `repo` スコープ
+   - Organization のプロジェクト: fine-grained PAT（Organization の Projects: Read and write、リポジトリの Issues / Pull requests: Read）か GitHub App のトークン
+5. プロジェクトのビューを **Board** にして **Column by: Stage** を選ぶ。
+
+トークンはラベルを操作するステップにだけ渡し、エージェントのステップには渡しません。
 
 ## 使い方
 
-1. Issue を作る（`factory:intake` が付く）。
-2. 着手するなら `factory:start` を付ける。
-3. 質問されたら（`factory:needs-info`）コメントで答える。
-4. bug 以外は、仕分け結果を見て `factory:plan` で受け入れる。
-5. 計画を読み、`factory:build` で承認する。
-6. PR に `factory:approved` が付いたら、内容を確認してマージする。
+1. Issue を作り、`factory` ラベルを付ける。リファインメントの結果（スコアと仕様）がコメントされる。
+2. 質問があれば `/factory 〇〇にしてください` のようにコメントで答える。相談だけなら回答が返り、決定を伝えれば計画が更新される。
+3. 計画に納得したら `factory:start` を付ける。
+4. PR ができたら、マージ確信度のレポートと CI を見てレビューする。直してほしい点は `/factory 〇〇を直して` とコメントする。
+5. マージする。
 
 ## 注意点
 
-- `GITHUB_TOKEN` によるプッシュや PR では、既存の CI などのワークフローが動きません。必須チェックを使う場合は GitHub App のトークン（`actions/create-github-app-token`）に切り替えてください。
-- Issue や PR の本文はエージェントにとって信用しない入力です。ステージを進めるラベルは書き込み権限のある人しか付けられず、各エージェントの使えるツールは絞ってあります。`FACTORY_CHECK_TOOLS` を広げるときは注意してください。
-- フロントエンドの見た目の確認はしません（Mastra も、テストだけでは足りない点として挙げています）。
+- CI の完了待ちはランナー上でポーリングするため、待っている間も Actions の実行時間を使います。
+- Issue や PR の本文はエージェントにとって信用しない入力です。ステップを動かすラベルや `/factory` は、書き込み権限のある人（リファインメントでは Issue の作成者も）しか使えません。各エージェントの使えるツールは絞ってあります。`FACTORY_CHECK_TOOLS` を広げるときは注意してください。
+- 競合は解消しません。`factory:conflict` が付いたら、人が解消するか、`/factory main をマージして競合を解消して` と依頼してください。
+- フロントエンドの見た目の確認（SuperPlane の visual evidence）は入れていません。

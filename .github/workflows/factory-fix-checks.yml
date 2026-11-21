@@ -1,0 +1,130 @@
+# Verify: fix failed checks   (SuperPlane: "Fix pull request checks")
+# Dispatched by factory-verify.yml when CI fails on a factory PR. One fresh agent run
+# reads the failed checks' logs, fixes every failure in this run, and pushes.
+name: "Factory: fix checks"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+      sha:
+        description: Head commit whose checks failed
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: factory-pr-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+  PR: ${{ inputs.pr_number }}
+  SHA: ${{ inputs.sha }}
+  FACTORY_REQUIRED_CHECKS: ${{ vars.FACTORY_REQUIRED_CHECKS }}
+  FACTORY_PUSH_TRIGGERS: ${{ vars.FACTORY_APP_ID != '' }}
+  READ_TOOLS: "Skill,Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh run view:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(ls:*)"
+  WRITE_TOOLS: "Edit,MultiEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git restore:*),Bash(mkdir:*),Bash(rm:*),Bash(mv:*)"
+  CHECK_TOOLS: ${{ vars.FACTORY_CHECK_TOOLS || 'Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(node:*),Bash(python:*),Bash(pytest:*),Bash(make:*),Bash(go:*),Bash(cargo:*)' }}
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Factory token
+        id: app
+        if: vars.FACTORY_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+
+      - name: Resolve PR
+        id: pr
+        run: |
+          read -r cur branch < <(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefOid,headRefName -q '"\(.headRefOid) \(.headRefName)"')
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if [ "$cur" != "$SHA" ]; then echo "Head moved to $cur; a newer verify run owns it."; echo "stale=true" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.pr.outputs.stale != 'true'
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Collect failed checks
+        id: prepare
+        if: steps.pr.outputs.stale != 'true'
+        run: |
+          source .github/factory/lib.sh
+          add_label pr "$PR" factory:running
+          git config user.name  "factory[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p "$FACTORY_TMP"
+          relevant_checks "$PR" | jq -c '.[] | select(.bucket == "fail" or .bucket == "cancel")' > "$FACTORY_TMP/failed.jsonl"
+          {
+            echo "# 失敗したチェック（コミット $SHA）"
+            while read -r c; do
+              name=$(jq -r .name <<<"$c"); link=$(jq -r '.link // ""' <<<"$c")
+              echo; echo "## $name"; echo "$link"
+              job=$(sed -n 's#.*/actions/runs/[0-9]*/job/\([0-9]*\).*#\1#p' <<<"$link")
+              if [ -n "$job" ]; then
+                echo; echo '```'; gh run view --job "$job" -R "$GITHUB_REPOSITORY" --log-failed 2>/dev/null | tail -n 150 || true; echo '```'
+              fi
+            done < "$FACTORY_TMP/failed.jsonl"
+          } > "$FACTORY_TMP/failed-checks.md"
+
+      # Add your toolchain here, same as factory-implement.yml.
+
+      - name: Fix agent
+        if: steps.pr.outputs.stale != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            factory-phase: verify / fix-checks
+            リポジトリ: ${{ github.repository }} / PR: #${{ inputs.pr_number }}
+            ブランチ: ${{ steps.pr.outputs.branch }}（チェックアウト済み）。失敗したチェックは .factory-tmp/failed-checks.md にあります。
+            factory-fix-checks スキル（.claude/skills/factory-fix-checks/SKILL.md）に従って直してください。
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_IMPLEMENT || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+            --max-turns 120
+            --allowedTools "${{ env.READ_TOOLS }},${{ env.WRITE_TOOLS }},${{ env.CHECK_TOOLS }}"
+
+      - name: Hand off back to Verify
+        if: always() && steps.prepare.outcome == 'success'
+        env:
+          BRANCH: ${{ steps.pr.outputs.branch }}
+        run: |
+          source .github/factory/lib.sh
+          accept_handoff pr "$PR" fixed not-this-pr blocked
+          post_file pr "$PR" "$FACTORY_TMP/comment.md"
+          remove_label pr "$PR" factory:running
+          case "$VERDICT" in
+            fixed)
+              git fetch -q origin "$BRANCH"
+              [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH")" ] || escalate pr "$PR" "ローカルのコミットがすべてプッシュされていません。"
+              [ "$(git rev-parse HEAD)" != "$SHA" ] || escalate pr "$PR" "修正のコミットがありません。"
+              after_push "$PR" ;;
+            not-this-pr)
+              add_label pr "$PR" factory:needs-human
+              say pr "$PR" "🏭 Factory: 失敗はこの PR の変更が原因ではないと判断しました（$(field .reason)）。人間の確認が必要です（\`factory:needs-human\`）。" ;;
+            blocked)
+              escalate pr "$PR" "失敗したチェックを直せませんでした（$(field .reason)）。" ;;
+          esac

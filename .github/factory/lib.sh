@@ -2,11 +2,11 @@
 #   source .github/factory/lib.sh
 # Requires GH_TOKEN and GITHUB_REPOSITORY.
 #
-# The board: every work item (issue) and change request (PR) carries exactly one
-# stage label, mirroring Mastra Factory's default stages.
+# The board: every work item (issue) and factory PR carries exactly one stage label,
+# mirroring SuperPlane's board columns: Backlog -> Implement -> Verify -> Done.
 set -euo pipefail
 
-FACTORY_STAGES="factory:intake factory:triage factory:planning factory:building factory:self-review factory:review factory:done"
+FACTORY_STAGES="factory:backlog factory:implement factory:verify factory:done"
 FACTORY_TMP=.factory-tmp
 
 # set_stage <issue|pr> <number> <stage-label>
@@ -30,10 +30,9 @@ _board_sync() {
   local kind=$1 n=$2 stage=$3 option path url item meta pid fid oid
   local owner=${FACTORY_PROJECT_OWNER:-${GITHUB_REPOSITORY%%/*}} num=$FACTORY_PROJECT_NUMBER
   case "$stage" in
-    factory:intake) option=Intake ;;        factory:triage) option=Triage ;;
-    factory:planning) option=Planning ;;    factory:building) option=Building ;;
-    factory:self-review) option=Self-review ;; factory:review) option=Review ;;
-    factory:done) option=Done ;;            *) return 1 ;;
+    factory:backlog) option=Backlog ;;  factory:implement) option=Implement ;;
+    factory:verify) option=Verify ;;    factory:done) option=Done ;;
+    *) return 1 ;;
   esac
   [ "$kind" = pr ] && path=pull || path=issues
   url="https://github.com/$GITHUB_REPOSITORY/$path/$n"
@@ -77,8 +76,53 @@ accept_handoff() {
   escalate "$kind" "$n" "想定外の判定 \`$v\` です（許可: $*）。"
 }
 
-# field <name>: read a field from result.json ('' if missing).
-field() { jq -r --arg k "$1" '.[$k] // "" | tostring' "$FACTORY_TMP/result.json"; }
+# field <jq path>: read a value from result.json ('' if missing), e.g. field .scores.clarity
+field() { jq -r "($1) // \"\" | tostring" "$FACTORY_TMP/result.json"; }
+
+# upsert_comment <issue|pr> <number> <marker> <file>: create or update the single
+# comment that contains <marker> (e.g. the merge confidence report).
+upsert_comment() {
+  local n=$2 marker=$3 file=$4 id
+  id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$n/comments" --paginate \
+         --jq ".[] | select(.body | contains(\"$marker\")) | .id" | tail -1)
+  if [ -n "$id" ]; then
+    gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$file" >/dev/null
+  else
+    gh "$1" comment "$n" -R "$GITHUB_REPOSITORY" --body-file "$file" >/dev/null
+  fi
+}
+
+# count_marker <number> <marker>: how many comments on the issue/PR contain <marker>.
+count_marker() {
+  gh api "repos/$GITHUB_REPOSITORY/issues/$1/comments" --paginate \
+    --jq ".[] | select(.body | contains(\"$2\")) | .id" | wc -l | tr -d ' '
+}
+
+# pr_issues <pr>: issue numbers the PR closes.
+pr_issues() {
+  gh pr view "$1" -R "$GITHUB_REPOSITORY" --json closingIssuesReferences -q '.closingIssuesReferences[].number'
+}
+
+# after_push <pr>: start Verify for the new head. With a GitHub App token the push
+# itself triggers pull_request:synchronize, so nothing is needed; with GITHUB_TOKEN
+# no workflow is triggered, so dispatch it.
+after_push() {
+  if [ "${FACTORY_PUSH_TRIGGERS:-false}" != true ]; then
+    dispatch factory-verify.yml pr_number="$1"
+  fi
+}
+
+# relevant_checks <pr>: JSON array of the PR's checks, excluding the factory's own
+# workflows, optionally limited to FACTORY_REQUIRED_CHECKS (comma separated names).
+relevant_checks() {
+  local json
+  json=$(gh pr checks "$1" -R "$GITHUB_REPOSITORY" --json name,state,bucket,link,workflow 2>/dev/null) || true
+  [ -n "$json" ] || json='[]'
+  jq --arg req "${FACTORY_REQUIRED_CHECKS:-}" '
+    [ .[] | select((.workflow // "") | startswith("Factory") | not)
+          | .name as $n
+          | select($req == "" or ($req | split(",") | map(gsub("^ +| +$"; "")) | index($n) != null)) ]' <<<"$json"
+}
 
 # dispatch <workflow-file> key=value...: start the next stage. Events created with
 # GITHUB_TOKEN do not trigger workflows, but workflow_dispatch is the exception.

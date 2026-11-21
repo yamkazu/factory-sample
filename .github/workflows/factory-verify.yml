@@ -1,0 +1,218 @@
+# Verify   (SuperPlane: Merge confidence + Fix pull request checks)
+#
+# Runs when a PR opens or gets new commits (or is dispatched after a factory push).
+#   merge-confidence  scores risk / security / drift from the spec / reversibility /
+#                     performance, detects merge conflicts (report only, no auto-resolve),
+#                     publishes one report comment + a commit status, and requests review
+#                     from the person who dispatched the work. Runs on every same-repo PR.
+#   checks            factory PRs only: waits for CI on this commit, and when checks fail,
+#                     starts one fix run (factory-fix-checks.yml). Waiting never consumes an
+#                     attempt; at most FACTORY_MAX_FIX_ATTEMPTS fixes per PR (default 3).
+# A newer commit cancels the run for the older one, so results never land on a moved head.
+name: "Factory: verify"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  statuses: write
+  actions: write
+
+concurrency:
+  group: factory-verify-${{ inputs.pr_number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+  PR: ${{ inputs.pr_number || github.event.pull_request.number }}
+  FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+  FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
+  FACTORY_REQUIRED_CHECKS: ${{ vars.FACTORY_REQUIRED_CHECKS }}
+  READ_TOOLS: "Skill,Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*),Bash(git rev-parse:*),Bash(ls:*)"
+  CHECK_TOOLS: ${{ vars.FACTORY_CHECK_TOOLS || 'Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(node:*),Bash(python:*),Bash(pytest:*),Bash(make:*),Bash(go:*),Bash(cargo:*)' }}
+
+jobs:
+  merge-confidence:
+    # Forks have no secrets, so only same-repo, non-draft PRs are assessed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # PRs opened before the secret is configured (including the one that adds the
+      # factory) should not fail; just skip.
+      - name: Check credentials
+        id: creds
+        env:
+          HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          echo "ok=$HAS_KEY" >> "$GITHUB_OUTPUT"
+          [ "$HAS_KEY" = true ] || echo "::notice::ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN not set; skipping merge confidence."
+
+      - name: Resolve head
+        id: head
+        if: steps.creds.outputs.ok == 'true'
+        run: |
+          gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefOid,headRefName \
+            -q '"sha=\(.headRefOid)\nbranch=\(.headRefName)"' >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.ok == 'true'
+        with:
+          ref: ${{ steps.head.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Prepare
+        id: prepare
+        if: steps.creds.outputs.ok == 'true'
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          BRANCH: ${{ steps.head.outputs.branch }}
+        run: |
+          # The PR head may predate the factory files, so load helpers from the base branch.
+          git show "origin/$DEFAULT_BRANCH:.github/factory/lib.sh" > /tmp/factory-lib.sh 2>/dev/null \
+            || cp .github/factory/lib.sh /tmp/factory-lib.sh
+          source /tmp/factory-lib.sh
+          mkdir -p "$FACTORY_TMP"
+          gh pr diff "$PR" -R "$GITHUB_REPOSITORY" > "$FACTORY_TMP/pr.diff"
+          if [[ "$BRANCH" == factory/* ]]; then
+            set_stage pr "$PR" factory:verify
+            for n in $(pr_issues "$PR"); do set_stage issue "$n" factory:verify; done
+          fi
+
+      - name: Merge confidence agent
+        if: steps.creds.outputs.ok == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            factory-phase: verify / merge-confidence
+            リポジトリ: ${{ github.repository }} / PR: #${{ env.PR }}
+            評価するヘッド: ${{ steps.head.outputs.sha }}（チェックアウト済み）。差分は .factory-tmp/pr.diff にあります。
+            factory-merge-confidence スキル（.claude/skills/factory-merge-confidence/SKILL.md）に従って評価してください。
+            PR のブランチにスキルが無い場合は `git show origin/${{ env.DEFAULT_BRANCH }}:.claude/skills/factory-merge-confidence/SKILL.md` で読んでください。
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_VERIFY || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+            --max-turns 60
+            --allowedTools "${{ env.READ_TOOLS }},${{ env.CHECK_TOOLS }}"
+
+      - name: Publish
+        if: always() && steps.prepare.outcome == 'success'
+        env:
+          SHA: ${{ steps.head.outputs.sha }}
+          BRANCH: ${{ steps.head.outputs.branch }}
+        run: |
+          source /tmp/factory-lib.sh
+          accept_handoff pr "$PR" assessed
+          [ "$(field .head)" = "$SHA" ] || escalate pr "$PR" "評価したコミット（$(field .head)）が対象（$SHA）と一致しません。"
+          cur=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefOid -q .headRefOid)
+          [ "$cur" = "$SHA" ] || { echo "PR head moved to $cur; not publishing a stale report."; exit 0; }
+
+          for k in risk security drift reversibility performance; do
+            case "$(field ".checks.$k.score")" in 1|2|3|4|5) ;; *) escalate pr "$PR" "マージ確信度の $k のスコアが 1〜5 ではありません。" ;; esac
+          done
+
+          # Merge conflicts are detected and reported, never auto-resolved.
+          mergeable=UNKNOWN
+          for i in 1 2 3 4 5; do
+            mergeable=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json mergeable -q .mergeable)
+            [ "$mergeable" != UNKNOWN ] && break; sleep 5
+          done
+          if [ "$mergeable" = CONFLICTING ]; then add_label pr "$PR" factory:conflict; else remove_label pr "$PR" factory:conflict; fi
+
+          concerns=$(jq '[.checks.risk.score >= 4, .checks.security.score <= 3, .checks.drift.score <= 3,
+                          .checks.reversibility.score <= 2, .checks.performance.score <= 2] | any' "$FACTORY_TMP/result.json")
+          [ "$mergeable" = CONFLICTING ] && concerns=true
+
+          {
+            echo "<!-- factory:merge-confidence -->"
+            echo "## マージ確信度"
+            echo
+            echo "評価したコミット: \`$SHA\`"
+            echo
+            echo "| チェック | スコア | 要約 |"
+            echo "| --- | --- | --- |"
+            jq -r '.checks | to_entries[] | "| \(.key) | \(.value.score) / 5 | \(.value.summary | gsub("\\|"; "/") | gsub("\n"; " ")) |"' "$FACTORY_TMP/result.json"
+            echo
+            echo "_risk は数字が大きいほど危険、ほかは大きいほど良い。_"
+            if [ "$mergeable" = CONFLICTING ]; then echo; echo "⚠️ **ベースブランチと競合しています。** ファクトリーは競合を自動で解消しません。"; fi
+            if [ "$(jq '.concerns | length' "$FACTORY_TMP/result.json")" -gt 0 ]; then
+              echo; echo "### 人間のレビューで見るべき点"
+              jq -r '.concerns[] | "- \(.)"' "$FACTORY_TMP/result.json"
+            fi
+          } > "$FACTORY_TMP/report.md"
+          upsert_comment pr "$PR" "<!-- factory:merge-confidence -->" "$FACTORY_TMP/report.md"
+
+          desc=$(jq -r '.checks | "risk \(.risk.score) · sec \(.security.score) · drift \(.drift.score) · rev \(.reversibility.score) · perf \(.performance.score)"' "$FACTORY_TMP/result.json")
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=success \
+            -f context=factory/merge-confidence -f description="$desc" >/dev/null
+          if [ "$concerns" = true ]; then add_label pr "$PR" factory:needs-review; else remove_label pr "$PR" factory:needs-review; fi
+
+          # Ask the person who dispatched the work to review (the merge stays a human decision).
+          who=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json body -q .body | sed -n 's/.*<!-- factory:dispatcher=\([A-Za-z0-9-]*\) -->.*/\1/p' | head -1)
+          if [[ "$BRANCH" == factory/* ]] && [ -n "$who" ]; then
+            gh pr edit "$PR" -R "$GITHUB_REPOSITORY" --add-reviewer "$who" >/dev/null 2>&1 || true
+          fi
+
+  checks:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (startsWith(github.event.pull_request.head.ref, 'factory/') &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Wait for checks
+        env:
+          WAIT_MINUTES: ${{ vars.FACTORY_CHECKS_TIMEOUT_MINUTES || '60' }}
+          MAX_ATTEMPTS: ${{ vars.FACTORY_MAX_FIX_ATTEMPTS || '3' }}
+        run: |
+          source .github/factory/lib.sh
+          read -r sha branch < <(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefOid,headRefName -q '"\(.headRefOid) \(.headRefName)"')
+          [[ "$branch" == factory/* ]] || { echo "Not a factory PR."; exit 0; }
+
+          deadline=$((SECONDS + WAIT_MINUTES * 60)); grace=$((SECONDS + 180))
+          while :; do
+            now=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefOid -q .headRefOid)
+            [ "$now" = "$sha" ] || { echo "Head moved to $now; the newer run takes over."; exit 0; }
+            checks=$(relevant_checks "$PR")
+            total=$(jq length <<<"$checks"); pending=$(jq '[.[] | select(.bucket == "pending")] | length' <<<"$checks")
+            if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then break; fi
+            if [ "$total" -eq 0 ] && [ "$SECONDS" -gt "$grace" ]; then echo "No CI checks reported; nothing to fix."; exit 0; fi
+            if [ "$SECONDS" -gt "$deadline" ]; then
+              say pr "$PR" "🏭 Factory: ${WAIT_MINUTES} 分待ってもチェックが終わりませんでした。チェックの状態を確認してください。"
+              exit 0
+            fi
+            sleep 30
+          done
+
+          failed=$(jq -c '[.[] | select(.bucket == "fail" or .bucket == "cancel")]' <<<"$checks")
+          if [ "$(jq length <<<"$failed")" -eq 0 ]; then echo "All checks passed."; exit 0; fi
+
+          attempts=$(count_marker "$PR" "<!-- factory:fix-attempt -->")
+          names=$(jq -r 'map(.name) | join(", ")' <<<"$failed")
+          if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then
+            add_label pr "$PR" factory:needs-human
+            say pr "$PR" "🏭 Factory: チェック（$names）が失敗しています。自動修正の上限（$MAX_ATTEMPTS 回）に達したため、人間の確認が必要です（\`factory:needs-human\`）。"
+            exit 0
+          fi
+          say pr "$PR" "<!-- factory:fix-attempt --> 🏭 Factory: チェック（$names）が失敗したため、自動修正します（$((attempts + 1)) / $MAX_ATTEMPTS 回目）。"
+          dispatch factory-fix-checks.yml pr_number="$PR" sha="$sha"

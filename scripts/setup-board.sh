@@ -13,7 +13,7 @@ set -euo pipefail
 REPO=${1:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}
 TITLE=${2:-Factory}
 OWNER=${REPO%%/*}
-STAGES="Intake,Triage,Planning,Building,Self-review,Review,Done"
+STAGES="Backlog,Implement,Verify,Done"
 
 num=$(gh project list --owner "$OWNER" --limit 200 --format json \
         --jq ".projects[] | select(.title == \"$TITLE\") | .number" | head -1)
@@ -26,7 +26,7 @@ fi
 
 if gh project field-list "$num" --owner "$OWNER" --format json --jq '.fields[].name' | grep -qx Stage; then
   echo "✓ Stage フィールドは作成済みです"
-  echo "  （選択肢は $STAGES の7つにしてください）"
+  echo "  （選択肢は $STAGES の4つにしてください）"
 else
   gh project field-create "$num" --owner "$OWNER" --name Stage \
     --data-type SINGLE_SELECT --single-select-options "$STAGES" >/dev/null
