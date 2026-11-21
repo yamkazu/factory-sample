@@ -83,7 +83,6 @@ Done                       PR と Issue に factory:done（同じ Issue の PR �
 | `factory-fix.yml` | Review からの起動 | Review（修正） |
 | `factory-done.yml` | ファクトリーの PR がマージされた | Done |
 | `factory-assist.yml` | コメントの `@claude` | 人間との対話 |
-| `factory-setup.yml` | 手動 | ラベル作成 |
 
 `GITHUB_TOKEN` で行った操作は他のワークフローを起動しないため、ステージ間は `workflow_dispatch` で明示的につないでいます。
 
@@ -92,7 +91,7 @@ Done                       PR と Issue に factory:done（同じ Issue の PR �
 1. リポジトリのシークレットに `ANTHROPIC_API_KEY` か `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token` で取得）のどちらかを追加する。
 2. Settings → Actions → General → Workflow permissions を **Read and write** にし、
    **Allow GitHub Actions to create and approve pull requests** にチェックを入れる。
-3. Actions → **Factory: setup labels** → Run workflow を1回実行する。
+3. `gh auth login` 済みの手元の環境で `scripts/setup-labels.sh` を実行し、ラベルを作る（何度実行しても大丈夫です。別のリポジトリなら `scripts/setup-labels.sh owner/repo`）。
 4. `@claude` メンションを使う場合は [Claude GitHub App](https://github.com/apps/claude) をインストールする。
 5. [`CLAUDE.md`](CLAUDE.md) の「チェック」にテストなどのコマンドを書き、`factory-build.yml` / `factory-fix.yml` にツールチェーンのセットアップを追加する。
 
