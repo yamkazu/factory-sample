@@ -1,0 +1,31 @@
+# Run once (Actions tab -> "Factory: setup labels" -> Run workflow) to create the labels.
+name: "Factory: setup labels"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  labels:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - run: |
+          set -e
+          mk() { gh label create "$1" -R "$GITHUB_REPOSITORY" --color "$2" --description "$3" --force; }
+          mk factory                   5319e7 "Intake: hand this issue to the software factory"
+          mk factory:triaging          c5def5 "Stage: triage agent is working"
+          mk factory:needs-info        fbca04 "Stage: waiting for the reporter to add details"
+          mk factory:ready             0e8a16 "Stage: triaged, ready to plan (re-add to re-plan)"
+          mk factory:planning          c5def5 "Stage: planning agent is working"
+          mk factory:plan-ready        fbca04 "Gate: plan posted, waiting for human approval"
+          mk factory:plan-approved     0e8a16 "Gate: human approved the plan, start building"
+          mk factory:building          c5def5 "Stage: build agent is working"
+          mk factory:in-review         c5def5 "Stage: PR open, in the review loop"
+          mk factory:changes-requested d93f0b "Review: agent requested changes"
+          mk factory:approved          0e8a16 "Review: agent approved, waiting for human merge"
+          mk factory:needs-human       b60205 "Escalated: the factory needs a human"
+          mk factory:done              1d76db "Done: PR merged"

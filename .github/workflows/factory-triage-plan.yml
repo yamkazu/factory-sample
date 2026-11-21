@@ -1,0 +1,110 @@
+# Factory stages 1-2: Triage -> Planning
+#
+# Intake gate: a maintainer adds the `factory` label to an issue (label events can only
+# come from people with triage/write access, so this doubles as "accept the task").
+# Triage decides ready / needs-info. When ready, Planning posts a plan and stops at the
+# human gate (`factory:plan-approved`).
+name: "Factory: triage & plan"
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  ISSUE: ${{ github.event.issue.number }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  triage:
+    # Run when the issue enters the factory, or when the reporter / a maintainer answers
+    # a needs-info question.
+    if: >-
+      github.event.issue.pull_request == null && (
+        (github.event_name == 'issues' && github.event.label.name == 'factory') ||
+        (github.event_name == 'issue_comment' &&
+          contains(github.event.issue.labels.*.name, 'factory:needs-info') &&
+          github.event.comment.user.type != 'Bot' &&
+          (github.event.comment.user.login == github.event.issue.user.login ||
+           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
+      )
+    runs-on: ubuntu-latest
+    # Job-level so unrelated comment events never queue behind (or cancel) real work.
+    concurrency:
+      group: factory-issue-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    timeout-minutes: 20
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
+    steps:
+      - name: Move card to Triage
+        run: gh issue edit "$ISSUE" -R "$GITHUB_REPOSITORY" --add-label factory:triaging --remove-label factory:needs-info
+
+      - uses: actions/checkout@v4
+
+      - name: Triage agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Repository: ${{ github.repository }}. Issue: #${{ github.event.issue.number }}.
+            Read .github/factory/agents/triage.md and follow it exactly.
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_TRIAGE || vars.FACTORY_MODEL || 'claude-sonnet-5-5' }}
+            --max-turns 30
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue edit:*)"
+
+      - name: Read verdict
+        id: verdict
+        run: |
+          labels=$(gh issue view "$ISSUE" -R "$GITHUB_REPOSITORY" --json labels -q '.labels[].name')
+          if grep -qx 'factory:ready' <<<"$labels"; then v=ready
+          elif grep -qx 'factory:needs-info' <<<"$labels"; then v=needs-info
+          else v=unknown; fi
+          echo "verdict=$v" >> "$GITHUB_OUTPUT"
+          if [ "$v" = unknown ]; then
+            gh issue edit "$ISSUE" -R "$GITHUB_REPOSITORY" --add-label factory:needs-human --remove-label factory:triaging
+            gh issue comment "$ISSUE" -R "$GITHUB_REPOSITORY" --body "Factory: triage finished without a verdict. A human needs to look at this issue."
+          fi
+
+  plan:
+    needs: triage
+    # Plan right after a `ready` triage, or when a maintainer (re)adds `factory:ready`
+    # by hand, e.g. after giving feedback on a previous plan.
+    if: >-
+      always() && github.event.issue.pull_request == null && (
+        needs.triage.outputs.verdict == 'ready' ||
+        (github.event_name == 'issues' && github.event.label.name == 'factory:ready')
+      )
+    runs-on: ubuntu-latest
+    # Job-level so unrelated comment events never queue behind (or cancel) real work.
+    concurrency:
+      group: factory-issue-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - name: Move card to Planning
+        run: gh issue edit "$ISSUE" -R "$GITHUB_REPOSITORY" --add-label factory:planning --remove-label factory:ready --remove-label factory:plan-ready
+
+      - uses: actions/checkout@v4
+
+      - name: Planning agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Repository: ${{ github.repository }}. Issue: #${{ github.event.issue.number }}.
+            Read .github/factory/agents/planner.md and follow it exactly.
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_PLAN || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+            --max-turns 50
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue edit:*)"

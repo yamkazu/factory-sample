@@ -1,0 +1,67 @@
+# Factory: Fix step of the review loop. Dispatched by factory-review.yml only.
+name: "Factory: fix"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+      iteration:
+        description: Fix round number (1-based)
+        required: true
+
+concurrency:
+  group: factory-pr-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+
+env:
+  PR: ${{ inputs.pr_number }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Resolve PR branch
+        id: pr
+        run: echo "branch=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefName -q .headRefName)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          fetch-depth: 0
+
+      - run: |
+          git config user.name  "factory[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Add your toolchain here, same as factory-build.yml.
+
+      - name: Fix agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Repository: ${{ github.repository }}. Pull request: #${{ inputs.pr_number }}.
+            Branch: ${{ steps.pr.outputs.branch }} (already checked out). Fix round ${{ inputs.iteration }}.
+            Read .github/factory/agents/fixer.md and follow it exactly.
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_BUILD || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+            --max-turns 80
+            --allowedTools "${{ vars.FACTORY_BUILD_TOOLS || 'Read,Glob,Grep,Edit,Write,MultiEdit,Bash(git:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(node:*),Bash(python:*),Bash(pytest:*),Bash(make:*),Bash(go:*),Bash(cargo:*),Bash(ls:*),Bash(cat:*)' }}"
+
+      - name: Back to review
+        run: |
+          gh pr edit "$PR" -R "$GITHUB_REPOSITORY" --remove-label factory:changes-requested
+          gh workflow run factory-review.yml -R "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" \
+            -f pr_number="$PR" -f iteration="${{ inputs.iteration }}"

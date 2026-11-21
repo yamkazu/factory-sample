@@ -1,0 +1,80 @@
+# Factory stage 4: Review (independent session) + bounded fix loop
+#
+# review -> (changes-requested) -> fix -> review -> ... up to FACTORY_MAX_FIX_ROUNDS,
+# then escalate to a human with `factory:needs-human`. Approved PRs wait for a human merge.
+name: "Factory: review"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+      iteration:
+        description: Fix rounds already done
+        required: false
+        default: "0"
+  pull_request:
+    types: [opened, ready_for_review]
+
+concurrency:
+  group: factory-pr-${{ inputs.pr_number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: write
+
+env:
+  PR: ${{ inputs.pr_number || github.event.pull_request.number }}
+  ITERATION: ${{ inputs.iteration || '0' }}
+  MAX_ROUNDS: ${{ vars.FACTORY_MAX_FIX_ROUNDS || '2' }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  review:
+    # Human-opened PRs from this repo also get a factory review (forks have no secrets).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ env.PR }}/head
+
+      - name: Review agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Repository: ${{ github.repository }}. Pull request: #${{ env.PR }}.
+            Read .github/factory/agents/reviewer.md and follow it exactly.
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_REVIEW || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+            --max-turns 50
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh issue view:*)"
+
+      - name: Route
+        run: |
+          labels=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json labels -q '.labels[].name')
+          grep -qx 'factory' <<<"$labels" || exit 0   # only factory PRs loop automatically
+          if grep -qx 'factory:approved' <<<"$labels"; then
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "Factory: review passed. Ready for a human to merge."
+          elif grep -qx 'factory:changes-requested' <<<"$labels"; then
+            if [ "$ITERATION" -lt "$MAX_ROUNDS" ]; then
+              gh workflow run factory-fix.yml -R "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" \
+                -f pr_number="$PR" -f iteration="$((ITERATION + 1))"
+            else
+              gh pr edit "$PR" -R "$GITHUB_REPOSITORY" --add-label factory:needs-human
+              gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "Factory: still failing review after $ITERATION fix round(s). Handing over to a human."
+            fi
+          else
+            gh pr edit "$PR" -R "$GITHUB_REPOSITORY" --add-label factory:needs-human
+          fi

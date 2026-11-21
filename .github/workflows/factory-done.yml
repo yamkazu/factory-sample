@@ -1,0 +1,25 @@
+# Factory stage 5: Done. When a human merges a factory PR, mark its issue(s) done.
+name: "Factory: done"
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  done:
+    if: github.event.pull_request.merged && contains(github.event.pull_request.labels.*.name, 'factory')
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for n in $(gh pr view "${{ github.event.pull_request.number }}" -R "$GITHUB_REPOSITORY" \
+                       --json closingIssuesReferences -q '.closingIssuesReferences[].number'); do
+            gh issue edit "$n" -R "$GITHUB_REPOSITORY" --add-label factory:done \
+              --remove-label factory:in-review --remove-label factory:plan-approved || true
+          done
