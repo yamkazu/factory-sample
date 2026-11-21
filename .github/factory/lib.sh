@@ -18,7 +18,7 @@ set_stage() {
 }
 
 # board_sync <issue|pr> <number> <stage-label>
-# Mirror the stage onto the GitHub Projects board (Mastra's kanban). Optional: runs only
+# Mirror the stage onto the GitHub Projects board (the factory kanban). Optional: runs only
 # when FACTORY_PROJECT_TOKEN and FACTORY_PROJECT_NUMBER are set. Labels stay the source of
 # truth, so a board failure is only a warning.
 board_sync() {

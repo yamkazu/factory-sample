@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mastra Factory のカンバンに相当する GitHub Projects ボードを作成する。
+# ファクトリーのカンバン（SuperPlane の Backlog / Implement / Verify / Done）を GitHub Projects に作成する。
 # 何度実行しても同じ結果になります（同名のプロジェクト・フィールドがあれば再利用）。
 #
 # 前提: gh auth login 済みで、project スコープがあること
@@ -46,5 +46,5 @@ cat <<MSG
   2. シークレット FACTORY_PROJECT_TOKEN に、project と repo スコープを持つトークンを追加
        gh secret set FACTORY_PROJECT_TOKEN -R "$REPO"
   3. $url を開き、ビューを Board にして「Column by: Stage」を選ぶ
-     （Mastra のように Work / Review を分けるなら、フィルタ is:issue と is:pr のビューを2つ作る）
+     （Issue と PR を分けて見たいなら、フィルタ is:issue と is:pr のビューを2つ作る）
 MSG
