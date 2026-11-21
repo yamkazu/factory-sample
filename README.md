@@ -64,8 +64,8 @@ Done                       PR と Issue に factory:done（同じ Issue の PR �
 
 Mastra Factory のボード画面の代わりに、GitHub Projects のボードを使います。
 ステージが変わるたびに、ワークフローが Issue / PR をプロジェクトに追加し、`Stage` 列（Intake / Triage / Planning / Building / Self-review / Review / Done）を更新します。
-ボードは表示用で、正しい状態はラベルです。ボードの更新に失敗してもファクトリーは止まりません（警告だけ出ます）。
-ボード上でカードを動かしてもステージは変わりません。ステージを進めるのはゲートのラベルです。
+ボードは**表示専用（読み取り専用）**で、正しい状態はラベルです。ボードの更新に失敗してもファクトリーは止まりません（警告だけ出ます）。
+**ボード上でカードを動かしてもステージは進みません。**操作は Issue / PR のゲートラベル（`factory:start` / `factory:plan` / `factory:build`）で行います。
 
 セットアップ:
 
