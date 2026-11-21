@@ -1,0 +1,76 @@
+# Stage: Planning   (Mastra Factory: Planning)
+#
+# Starts when a person accepts the task with `factory:plan` (also used to re-plan after
+# giving feedback), when Triage auto-accepts a bug, or when Building sends the item back.
+# Ends at the human gate: a person approves the plan with `factory:build`.
+name: "Factory: plan"
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to plan
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  ISSUE: ${{ inputs.issue || github.event.issue.number }}
+  READ_TOOLS: "Skill,Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh search:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*)"
+
+jobs:
+  plan:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request == null &&
+       github.event.label.name == 'factory:plan' &&
+       github.event.sender.type != 'Bot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    concurrency:
+      group: factory-issue-${{ inputs.issue || github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Move to Planning
+        id: prepare
+        run: |
+          source .github/factory/lib.sh
+          set_stage issue "$ISSUE" factory:planning
+          remove_label issue "$ISSUE" factory:plan factory:waiting factory:needs-human
+          add_label issue "$ISSUE" factory:running
+          mkdir -p "$FACTORY_TMP"
+
+      - name: Planning agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            factory-phase: planning
+            リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
+            factory-plan スキル（.claude/skills/factory-plan/SKILL.md）に従って、この Issue の実装計画を作ってください。
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_PLAN || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+            --max-turns 60
+            --allowedTools "${{ env.READ_TOOLS }}"
+
+      - name: Hand off
+        if: always() && steps.prepare.outcome == 'success'
+        run: |
+          source .github/factory/lib.sh
+          accept_handoff issue "$ISSUE" planned
+          [ -s "$FACTORY_TMP/comment.md" ] || escalate issue "$ISSUE" "計画（comment.md）が出力されませんでした。"
+          post_file issue "$ISSUE" "$FACTORY_TMP/comment.md"
+          remove_label issue "$ISSUE" factory:running
+          add_label issue "$ISSUE" factory:waiting
+          say issue "$ISSUE" "🏭 Factory: 計画ができました。承認して実装に進める場合は \`factory:build\` ラベルを付けてください。修正してほしい場合は、コメントでフィードバックしてから \`factory:plan\` ラベルを付け直してください。"

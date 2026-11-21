@@ -1,4 +1,6 @@
-# Factory stage 5: Done. When a human merges a factory PR, mark its issue(s) done.
+# Stage: Done   (Mastra Factory: Done)
+# Merging a PR completes its Review card and moves the originating work item to Done,
+# unless that item still has another open PR.
 name: "Factory: done"
 
 on:
@@ -6,20 +8,33 @@ on:
     types: [closed]
 
 permissions:
+  contents: read
   issues: write
-  pull-requests: read
+  pull-requests: write
 
 env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  PR: ${{ github.event.pull_request.number }}
 
 jobs:
   done:
-    if: github.event.pull_request.merged && contains(github.event.pull_request.labels.*.name, 'factory')
+    if: github.event.pull_request.merged && contains(github.event.pull_request.labels.*.name, 'factory:review')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
       - run: |
-          for n in $(gh pr view "${{ github.event.pull_request.number }}" -R "$GITHUB_REPOSITORY" \
-                       --json closingIssuesReferences -q '.closingIssuesReferences[].number'); do
-            gh issue edit "$n" -R "$GITHUB_REPOSITORY" --add-label factory:done \
-              --remove-label factory:in-review --remove-label factory:plan-approved || true
+          source .github/factory/lib.sh
+          set_stage pr "$PR" factory:done
+          remove_label pr "$PR" factory:approved factory:running factory:waiting
+          open_refs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --json closingIssuesReferences \
+                        -q '[.[].closingIssuesReferences[].number] | unique | .[]')
+          for n in $(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json closingIssuesReferences -q '.closingIssuesReferences[].number'); do
+            if grep -qx "$n" <<<"$open_refs"; then
+              echo "#$n still has another open PR; leaving it in Review"
+              continue
+            fi
+            set_stage issue "$n" factory:done
+            remove_label issue "$n" factory:running factory:waiting
           done

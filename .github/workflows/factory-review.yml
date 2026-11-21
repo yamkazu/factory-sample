@@ -1,7 +1,9 @@
-# Factory stage 4: Review (independent session) + bounded fix loop
+# Stage: Review   (Mastra Factory: Review board)
 #
-# review -> (changes-requested) -> fix -> review -> ... up to FACTORY_MAX_FIX_ROUNDS,
-# then escalate to a human with `factory:needs-human`. Approved PRs wait for a human merge.
+# Every PR gets its own review session, separate from the session that wrote it.
+# Factory PRs loop: request-changes -> factory-fix -> review, up to FACTORY_MAX_FIX_ROUNDS,
+# then escalate with `factory:needs-human`. Approved PRs wait for a person to merge.
+# PRs opened by people in this repo are reviewed too, but never auto-fixed.
 name: "Factory: review"
 
 on:
@@ -17,10 +19,6 @@ on:
   pull_request:
     types: [opened, ready_for_review]
 
-concurrency:
-  group: factory-pr-${{ inputs.pr_number || github.event.pull_request.number }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
   issues: write
@@ -28,20 +26,26 @@ permissions:
   actions: write
 
 env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
   PR: ${{ inputs.pr_number || github.event.pull_request.number }}
   ITERATION: ${{ inputs.iteration || '0' }}
   MAX_ROUNDS: ${{ vars.FACTORY_MAX_FIX_ROUNDS || '2' }}
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  READ_TOOLS: "Skill,Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh issue view:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*),Bash(git rev-parse:*)"
+  CHECK_TOOLS: ${{ vars.FACTORY_CHECK_TOOLS || 'Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(node:*),Bash(python:*),Bash(pytest:*),Bash(make:*),Bash(go:*),Bash(cargo:*),Bash(ls:*)' }}
 
 jobs:
   review:
-    # Human-opened PRs from this repo also get a factory review (forks have no secrets).
+    # Forks have no secrets, so only same-repo PRs are reviewed.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false &&
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    concurrency:
+      group: factory-pr-${{ inputs.pr_number || github.event.pull_request.number }}
+      cancel-in-progress: false
     steps:
       # PRs opened before the secret is configured (including the one that adds the
       # factory) should not fail; just skip the review.
@@ -57,6 +61,22 @@ jobs:
         if: steps.creds.outputs.ok == 'true'
         with:
           ref: refs/pull/${{ env.PR }}/head
+          fetch-depth: 0
+
+      - name: Move to Review
+        id: prepare
+        if: steps.creds.outputs.ok == 'true'
+        run: |
+          # The checked-out PR head may not contain the factory files (e.g. human PRs
+          # branched before the factory existed), so load the helpers from the base branch.
+          git show "origin/$DEFAULT_BRANCH:.github/factory/lib.sh" > /tmp/factory-lib.sh 2>/dev/null \
+            || cp .github/factory/lib.sh /tmp/factory-lib.sh
+          source /tmp/factory-lib.sh
+          set_stage pr "$PR" factory:review
+          remove_label pr "$PR" factory:approved factory:needs-human
+          add_label pr "$PR" factory:running
+          mkdir -p "$FACTORY_TMP"
+          echo "head=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefOid -q .headRefOid)" >> "$GITHUB_OUTPUT"
 
       - name: Review agent
         if: steps.creds.outputs.ok == 'true'
@@ -66,28 +86,39 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
-            Repository: ${{ github.repository }}. Pull request: #${{ env.PR }}.
-            Read .github/factory/agents/reviewer.md and follow it exactly.
+            factory-phase: pr-review（修正ラウンド ${{ env.ITERATION }}）
+            リポジトリ: ${{ github.repository }} / PR: #${{ env.PR }}（ヘッドをチェックアウト済み）
+            factory-review スキル（.claude/skills/factory-review/SKILL.md）に従って、この PR をレビューしてください。
+            PR のブランチにスキルが無い場合は、`git show origin/${{ env.DEFAULT_BRANCH }}:.claude/skills/factory-review/SKILL.md` で読んでください。
           claude_args: >-
             --model ${{ vars.FACTORY_MODEL_REVIEW || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
-            --max-turns 50
-            --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr edit:*),Bash(gh issue view:*)"
+            --max-turns 60
+            --allowedTools "${{ env.READ_TOOLS }},${{ env.CHECK_TOOLS }}"
 
-      - name: Route
-        if: steps.creds.outputs.ok == 'true'
+      - name: Hand off and route
+        if: always() && steps.prepare.outcome == 'success'
+        env:
+          HEAD_SHA: ${{ steps.prepare.outputs.head }}
         run: |
+          source /tmp/factory-lib.sh
+          accept_handoff pr "$PR" approve request-changes
+          reviewed=$(field reviewed_head)
+          [ "$reviewed" = "$HEAD_SHA" ] || escalate pr "$PR" "レビューしたコミット（$reviewed）が PR のヘッド（$HEAD_SHA）と一致しません。"
+          post_file pr "$PR" "$FACTORY_TMP/comment.md"
+          remove_label pr "$PR" factory:running
+
+          if [ "$VERDICT" = approve ]; then
+            add_label pr "$PR" factory:approved
+            remove_label pr "$PR" factory:changes-requested
+            say pr "$PR" "🏭 Factory: レビューを通過しました。人間がマージしてください。"
+            exit 0
+          fi
+          add_label pr "$PR" factory:changes-requested
+
           labels=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json labels -q '.labels[].name')
-          grep -qx 'factory' <<<"$labels" || exit 0   # only factory PRs loop automatically
-          if grep -qx 'factory:approved' <<<"$labels"; then
-            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "Factory: review passed. Ready for a human to merge."
-          elif grep -qx 'factory:changes-requested' <<<"$labels"; then
-            if [ "$ITERATION" -lt "$MAX_ROUNDS" ]; then
-              gh workflow run factory-fix.yml -R "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" \
-                -f pr_number="$PR" -f iteration="$((ITERATION + 1))"
-            else
-              gh pr edit "$PR" -R "$GITHUB_REPOSITORY" --add-label factory:needs-human
-              gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "Factory: still failing review after $ITERATION fix round(s). Handing over to a human."
-            fi
+          grep -qx factory <<<"$labels" || exit 0      # human PRs: review only, no auto-fix
+          if [ "$ITERATION" -lt "$MAX_ROUNDS" ]; then
+            dispatch factory-fix.yml pr_number="$PR" iteration="$((ITERATION + 1))"
           else
-            gh pr edit "$PR" -R "$GITHUB_REPOSITORY" --add-label factory:needs-human
+            escalate pr "$PR" "修正を $ITERATION 回行ってもレビューを通過しませんでした。"
           fi

@@ -1,4 +1,4 @@
-# Run once (Actions tab -> "Factory: setup labels" -> Run workflow) to create the labels.
+# Run once (Actions tab -> "Factory: setup labels" -> Run workflow) to create the board labels.
 name: "Factory: setup labels"
 
 on:
@@ -16,16 +16,28 @@ jobs:
       - run: |
           set -e
           mk() { gh label create "$1" -R "$GITHUB_REPOSITORY" --color "$2" --description "$3" --force; }
-          mk factory                   5319e7 "Intake: hand this issue to the software factory"
-          mk factory:triaging          c5def5 "Stage: triage agent is working"
-          mk factory:needs-info        fbca04 "Stage: waiting for the reporter to add details"
-          mk factory:ready             0e8a16 "Stage: triaged, ready to plan (re-add to re-plan)"
-          mk factory:planning          c5def5 "Stage: planning agent is working"
-          mk factory:plan-ready        fbca04 "Gate: plan posted, waiting for human approval"
-          mk factory:plan-approved     0e8a16 "Gate: human approved the plan, start building"
-          mk factory:building          c5def5 "Stage: build agent is working"
-          mk factory:in-review         c5def5 "Stage: PR open, in the review loop"
+          # Stages (exactly one per issue / PR)
+          mk factory:intake            ededed "Stage: Intake (on the board, not started)"
+          mk factory:triage            c5def5 "Stage: Triage"
+          mk factory:planning          bfd4f2 "Stage: Planning"
+          mk factory:building          d4c5f9 "Stage: Building"
+          mk factory:self-review       d4c5f9 "Stage: Self-review (before the PR exists)"
+          mk factory:review            fef2c0 "Stage: Review (PR open)"
+          mk factory:done              0e8a16 "Stage: Done"
+          # Human gates: add these to move the work forward
+          mk factory:start             5319e7 "Gate: start the run (Intake -> Triage)"
+          mk factory:plan              5319e7 "Gate: accept the task / re-plan (-> Planning)"
+          mk factory:build             5319e7 "Gate: approve the plan (-> Building)"
+          # Status
+          mk factory:running           1d76db "Status: an agent is working"
+          mk factory:waiting           fbca04 "Status: waiting for a person (see the last comment)"
+          mk factory:needs-info        fbca04 "Status: waiting for the reporter to add details"
+          mk factory:needs-human       b60205 "Status: escalated, the factory needs a person"
+          mk factory:approved          0e8a16 "Review: agent approved, waiting for a human merge"
           mk factory:changes-requested d93f0b "Review: agent requested changes"
-          mk factory:approved          0e8a16 "Review: agent approved, waiting for human merge"
-          mk factory:needs-human       b60205 "Escalated: the factory needs a human"
-          mk factory:done              1d76db "Done: PR merged"
+          mk factory                   5319e7 "PR opened by the factory"
+          # Triage classification
+          mk type:bug                  d73a4a "Type: bug"
+          mk type:feature              a2eeef "Type: feature"
+          mk type:chore                cfd3d7 "Type: chore"
+          mk type:docs                 0075ca "Type: docs"

@@ -1,17 +1,18 @@
-# Project guide for agents
+# エージェント向けプロジェクトガイド
 
-This file is read by every factory agent (triage, planning, build, review, fix).
-Keep it short and accurate: it is the main lever for the quality of the factory's output.
+ファクトリーのすべてのスキル（triage / plan / build / self-review / review / fix）がこのファイルを読みます。
+短く正確に保ってください。ファクトリーの出力の質を一番左右するファイルです。
 
-## Conventions
-- Keep changes small and focused on the issue.
-- Every behaviour change needs a test.
+## 規約
+- 変更は小さく、Issue に関係することだけにする。
+- 振る舞いを変えたら必ずテストを書く。
+- ファクトリーの手順は `.claude/skills/factory-*/SKILL.md` にある。手順を変えるときはスキルを PR で変更する。
 
-## Checks
-List the exact commands the build / fix agents must run before opening or updating a PR.
-<!-- Example:
+## チェック
+Building / Self-review / Review / Fix が実行するコマンドを書いてください。
+<!-- 例:
 - `npm ci`
 - `npm run lint`
 - `npm test`
 -->
-- (no code yet: there are no checks to run)
+- （まだコードが無いため、実行するチェックはありません）

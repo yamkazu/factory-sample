@@ -1,9 +1,11 @@
-# Factory stage 3: Building
+# Stages: Building -> Self-review -> (open PR) -> Review   (Mastra Factory: Building / Self-review)
 #
-# Human gate: a maintainer adds `factory:plan-approved` after reading the plan.
-# The builder implements the plan on `factory/issue-<n>`, opens a PR, and hands the PR
-# to the review loop via workflow_dispatch (events created with GITHUB_TOKEN do not
-# trigger other workflows, but workflow_dispatch is the documented exception).
+# Human gate: a person approves the plan by adding `factory:build`.
+# 1. factory-build implements the plan on factory/issue-<n> and pushes (no PR yet).
+# 2. factory-self-review reviews the pushed branch in a fresh session.
+#    request-changes -> factory-build (fix mode) -> factory-self-review, once.
+# 3. The workflow opens the PR titled after the issue (or updates the open one) and
+#    hands it to the Review stage. If the plan turns out wrong, the item goes back to Planning.
 name: "Factory: build"
 
 on:
@@ -17,32 +19,40 @@ permissions:
   actions: write
 
 env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
   ISSUE: ${{ github.event.issue.number }}
   BRANCH: factory/issue-${{ github.event.issue.number }}
-  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  READ_TOOLS: "Skill,Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh pr view:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*)"
+  WRITE_TOOLS: "Edit,MultiEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git stash:*),Bash(mkdir:*)"
+  # Commands the agents may run for tests / lint / typecheck. Adjust to your stack.
+  CHECK_TOOLS: ${{ vars.FACTORY_CHECK_TOOLS || 'Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(node:*),Bash(python:*),Bash(pytest:*),Bash(make:*),Bash(go:*),Bash(cargo:*),Bash(ls:*)' }}
+  MODEL_BUILD: ${{ vars.FACTORY_MODEL_BUILD || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+  MODEL_REVIEW: ${{ vars.FACTORY_MODEL_REVIEW || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
 
 jobs:
   build:
     if: >-
       github.event.issue.pull_request == null &&
-      github.event.label.name == 'factory:plan-approved' &&
+      github.event.label.name == 'factory:build' &&
       github.event.sender.type != 'Bot'
     runs-on: ubuntu-latest
-    # Job-level so unrelated comment events never queue behind (or cancel) real work.
+    timeout-minutes: 120
     concurrency:
       group: factory-issue-${{ github.event.issue.number }}
       cancel-in-progress: false
-    timeout-minutes: 60
     steps:
-      - name: Move card to Building
-        run: gh issue edit "$ISSUE" -R "$GITHUB_REPOSITORY" --add-label factory:building --remove-label factory:plan-ready
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Prepare branch
+      - name: Move to Building
+        id: prepare
         run: |
+          source .github/factory/lib.sh
+          set_stage issue "$ISSUE" factory:building
+          remove_label issue "$ISSUE" factory:build factory:waiting factory:needs-human
+          add_label issue "$ISSUE" factory:running
           git config user.name  "factory[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
@@ -50,10 +60,12 @@ jobs:
           else
             git checkout -b "$BRANCH"
           fi
+          mkdir -p "$FACTORY_TMP"
 
-      # Add your toolchain here (actions/setup-node, setup-python, ...) so the agent can
+      # Add your toolchain here (actions/setup-node, setup-python, ...) so the agents can
       # run the checks listed in CLAUDE.md.
 
+      # ---- Building -------------------------------------------------------------------
       - name: Build agent
         uses: anthropics/claude-code-action@v1
         with:
@@ -61,23 +73,148 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
-            Repository: ${{ github.repository }}. Issue: #${{ github.event.issue.number }}.
-            Branch: ${{ env.BRANCH }} (already checked out). Base branch: ${{ github.event.repository.default_branch }}.
-            Read .github/factory/agents/builder.md and follow it exactly.
+            factory-phase: building
+            リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
+            作業ブランチ: ${{ env.BRANCH }}（チェックアウト済み） / ベースブランチ: ${{ env.DEFAULT_BRANCH }}
+            factory-build スキル（.claude/skills/factory-build/SKILL.md）に従って、承認済みの計画を実装してください。
           claude_args: >-
-            --model ${{ vars.FACTORY_MODEL_BUILD || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
-            --max-turns 120
-            --allowedTools "${{ vars.FACTORY_BUILD_TOOLS || 'Read,Glob,Grep,Edit,Write,MultiEdit,Bash(git:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh pr create:*),Bash(gh pr view:*),Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(node:*),Bash(python:*),Bash(pytest:*),Bash(make:*),Bash(go:*),Bash(cargo:*),Bash(ls:*),Bash(cat:*)' }}"
+            --model ${{ env.MODEL_BUILD }}
+            --max-turns 150
+            --allowedTools "${{ env.READ_TOOLS }},${{ env.WRITE_TOOLS }},${{ env.CHECK_TOOLS }}"
 
-      - name: Hand off to review
+      - name: Hand off from Building
+        id: built
+        if: always() && steps.prepare.outcome == 'success'
         run: |
-          pr=$(gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number -q '.[0].number')
-          if [ -z "$pr" ]; then
-            gh issue edit "$ISSUE" -R "$GITHUB_REPOSITORY" --add-label factory:needs-human --remove-label factory:building
-            gh issue comment "$ISSUE" -R "$GITHUB_REPOSITORY" --body "Factory: the build agent did not open a pull request. A human needs to look at this issue."
-            exit 1
+          source .github/factory/lib.sh
+          accept_handoff issue "$ISSUE" built replan
+          if [ "$VERDICT" = replan ]; then
+            # Mastra: if the plan proves wrong, the card goes back to Planning.
+            post_file issue "$ISSUE" "$FACTORY_TMP/comment.md"
+            remove_label issue "$ISSUE" factory:running
+            dispatch factory-plan.yml issue="$ISSUE"
+            echo "next=replan" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          gh issue edit "$ISSUE" -R "$GITHUB_REPOSITORY" --add-label factory:in-review --remove-label factory:building
-          gh pr edit "$pr" -R "$GITHUB_REPOSITORY" --add-label factory
-          gh workflow run factory-review.yml -R "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" \
-            -f pr_number="$pr" -f iteration=0
+          git fetch -q origin "$BRANCH" || escalate issue "$ISSUE" "作業ブランチ \`$BRANCH\` がプッシュされていません。"
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH")" ] || escalate issue "$ISSUE" "ローカルの変更がすべてプッシュされていません。"
+          [ "$(git rev-list --count "origin/$DEFAULT_BRANCH..HEAD")" -gt 0 ] || escalate issue "$ISSUE" "実装のコミットがありません。"
+          [ -s "$FACTORY_TMP/pr-body.md" ] || escalate issue "$ISSUE" "PR 本文（pr-body.md）が出力されませんでした。"
+          set_stage issue "$ISSUE" factory:self-review
+          echo "next=self-review" >> "$GITHUB_OUTPUT"
+
+      # ---- Self-review (round 1) ------------------------------------------------------
+      - name: Self-review agent
+        if: steps.built.outputs.next == 'self-review'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            factory-phase: self-review
+            リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
+            作業ブランチ: ${{ env.BRANCH }}（チェックアウト済み） / ベースブランチ: ${{ env.DEFAULT_BRANCH }}
+            factory-self-review スキル（.claude/skills/factory-self-review/SKILL.md）に従って、この作業ブランチをレビューしてください。
+          claude_args: >-
+            --model ${{ env.MODEL_REVIEW }}
+            --max-turns 60
+            --allowedTools "${{ env.READ_TOOLS }},${{ env.CHECK_TOOLS }}"
+
+      - name: Hand off from Self-review
+        id: sr1
+        if: always() && steps.built.outputs.next == 'self-review'
+        run: |
+          source .github/factory/lib.sh
+          accept_handoff issue "$ISSUE" approve request-changes
+          [ -z "$(git status --porcelain)" ] || escalate issue "$ISSUE" "Self-review がコードを変更しました（レビューは読み取りのみです）。"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          [ "$VERDICT" = approve ] || set_stage issue "$ISSUE" factory:building
+
+      # ---- Building (fix mode) -> Self-review (round 2) ---------------------------------
+      - name: Build agent (fix self-review findings)
+        if: steps.sr1.outputs.verdict == 'request-changes'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            factory-phase: building（修正モード）
+            リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
+            作業ブランチ: ${{ env.BRANCH }}（チェックアウト済み） / ベースブランチ: ${{ env.DEFAULT_BRANCH }}
+            factory-build スキル（.claude/skills/factory-build/SKILL.md）の「修正モード」に従って、
+            .factory-tmp/self-review.md の「必要な修正」に対応してください。
+          claude_args: >-
+            --model ${{ env.MODEL_BUILD }}
+            --max-turns 100
+            --allowedTools "${{ env.READ_TOOLS }},${{ env.WRITE_TOOLS }},${{ env.CHECK_TOOLS }}"
+
+      - name: Hand off from Building (fix)
+        id: fixed
+        if: always() && steps.sr1.outputs.verdict == 'request-changes'
+        run: |
+          source .github/factory/lib.sh
+          accept_handoff issue "$ISSUE" built
+          git fetch -q origin "$BRANCH"
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH")" ] || escalate issue "$ISSUE" "ローカルの変更がすべてプッシュされていません。"
+          set_stage issue "$ISSUE" factory:self-review
+
+      - name: Self-review agent (round 2)
+        if: steps.fixed.outcome == 'success'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            factory-phase: self-review（2回目）
+            リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
+            作業ブランチ: ${{ env.BRANCH }}（チェックアウト済み） / ベースブランチ: ${{ env.DEFAULT_BRANCH }}
+            factory-self-review スキル（.claude/skills/factory-self-review/SKILL.md）に従って、この作業ブランチをもう一度レビューしてください。
+            前回の指摘は .factory-tmp/self-review.md にあります。上書きして構いません。
+          claude_args: >-
+            --model ${{ env.MODEL_REVIEW }}
+            --max-turns 60
+            --allowedTools "${{ env.READ_TOOLS }},${{ env.CHECK_TOOLS }}"
+
+      - name: Hand off from Self-review (round 2)
+        id: sr2
+        if: always() && steps.fixed.outcome == 'success'
+        run: |
+          source .github/factory/lib.sh
+          accept_handoff issue "$ISSUE" approve request-changes
+          [ -z "$(git status --porcelain)" ] || escalate issue "$ISSUE" "Self-review がコードを変更しました（レビューは読み取りのみです）。"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+      # ---- Open the change request and move to Review ---------------------------------
+      - name: Open PR and move to Review
+        if: steps.sr1.outputs.verdict == 'approve' || steps.sr2.outcome == 'success'
+        env:
+          FINAL: ${{ steps.sr2.outputs.verdict || steps.sr1.outputs.verdict }}
+        run: |
+          source .github/factory/lib.sh
+          body="$FACTORY_TMP/pr-body.md"
+          if [ "$FINAL" != approve ]; then
+            { echo; echo "## ⚠️ Self-review で解消しきれなかった指摘"; echo; cat "$FACTORY_TMP/self-review.md"; } >> "$body"
+          fi
+          title=$(gh issue view "$ISSUE" -R "$GITHUB_REPOSITORY" --json title -q .title)
+          pr=$(gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number -q '.[0].number')
+          if [ -n "$pr" ]; then
+            # Mastra: an already-open change request is pushed to, not duplicated.
+            gh pr edit "$pr" -R "$GITHUB_REPOSITORY" --body-file "$body" >/dev/null
+          else
+            url=$(gh pr create -R "$GITHUB_REPOSITORY" --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+                    --title "$title" --body-file "$body")
+            pr=${url##*/}
+          fi
+          add_label pr "$pr" factory
+          set_stage pr "$pr" factory:review
+          set_stage issue "$ISSUE" factory:review
+          remove_label issue "$ISSUE" factory:running
+          if [ "$FINAL" = approve ]; then
+            dispatch factory-review.yml pr_number="$pr" iteration=0
+          else
+            add_label pr "$pr" factory:needs-human
+            say pr "$pr" "🏭 Factory: Self-review の指摘が2回目でも解消しなかったため、人間の確認が必要です（\`factory:needs-human\`）。"
+          fi
