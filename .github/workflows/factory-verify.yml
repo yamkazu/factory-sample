@@ -92,7 +92,6 @@ jobs:
             for n in $(pr_issues "$PR"); do set_stage issue "$n" factory:verify; done
           fi
 
-      # Only to learn the factory App's bot name for allowed_bots below.
       - name: Factory App identity
         id: app
         if: steps.creds.outputs.ok == 'true' && vars.FACTORY_APP_ID != ''
@@ -101,7 +100,7 @@ jobs:
         with:
           app-id: ${{ vars.FACTORY_APP_ID }}
           private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
-          permission-metadata: read  # the token is never used
+          permission-metadata: read
 
       - name: Merge confidence agent
         if: steps.creds.outputs.ok == 'true'
@@ -110,9 +109,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          # The factory starts its own steps (workflow_dispatch from GITHUB_TOKEN, pushes and PRs
-          # from the factory App). Allow exactly those two bots; claude-code-action rejects others.
-          allowed_bots: "github-actions,${{ steps.app.outputs.app-slug }}"
+          allowed_bots: ${{ steps.app.outputs.app-slug && format('github-actions,{0}', steps.app.outputs.app-slug) || 'github-actions' }}
           prompt: |
             factory-phase: verify / merge-confidence
             リポジトリ: ${{ github.repository }} / PR: #${{ env.PR }}
