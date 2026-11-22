@@ -74,15 +74,25 @@ jobs:
             gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes >/dev/null || true
           fi
 
+      # Only to learn the factory App's bot name for allowed_bots below.
+      - name: Factory App identity
+        id: app
+        if: vars.FACTORY_APP_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+
       - name: Refinement agent
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          # Factory steps start each other with workflow_dispatch (GITHUB_TOKEN or the App), so the
-          # actor can be a bot. Only writers can dispatch, so trust the dispatching actor.
-          allowed_bots: ${{ github.event_name == 'workflow_dispatch' && github.actor || '' }}
+          # The factory starts its own steps (workflow_dispatch from GITHUB_TOKEN, pushes and PRs
+          # from the factory App). Allow exactly those two bots; claude-code-action rejects others.
+          allowed_bots: "github-actions,${{ steps.app.outputs.app-slug }}"
           prompt: |
             factory-phase: backlog-refinement
             リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
