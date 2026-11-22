@@ -1,0 +1,51 @@
+# Done   (SuperPlane: PR closure)
+# Merged factory PR -> its issue(s) move to Done, unless another open factory PR still
+# closes the same issue. Closed without merging -> the issue goes back to Backlog.
+name: "Factory: closure"
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  PR: ${{ github.event.pull_request.number }}
+  FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+  FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
+
+jobs:
+  closure:
+    if: startsWith(github.event.pull_request.head.ref, 'factory/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Close out
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          source .github/factory/lib.sh
+          remove_label pr "$PR" factory:running factory:needs-review factory:conflict
+          issues=$(pr_issues "$PR")
+          if [ "$MERGED" = true ]; then
+            set_stage pr "$PR" factory:done
+            open_refs=$(gh pr list -R "$GITHUB_REPOSITORY" --state open --json closingIssuesReferences \
+                          -q '[.[].closingIssuesReferences[].number] | unique | .[]')
+            for n in $issues; do
+              if grep -qx "$n" <<<"$open_refs"; then echo "#$n still has another open PR."; continue; fi
+              set_stage issue "$n" factory:done
+              remove_label issue "$n" factory:running factory:needs-human
+            done
+          else
+            for n in $issues; do
+              set_stage issue "$n" factory:backlog
+              say issue "$n" "🏭 Factory: PR #$PR がマージされずに閉じられたため、Backlog に戻しました。やり直すなら \`factory:start\` を付けてください。"
+            done
+          fi

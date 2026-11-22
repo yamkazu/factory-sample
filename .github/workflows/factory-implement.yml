@@ -1,0 +1,143 @@
+# Implement   (SuperPlane: dispatch -> Implement line)
+#
+# A person dispatches a Backlog issue with `factory:start` (or refinement auto-dispatches
+# a confidence-3 plan). One fresh agent run implements the spec on factory/issue-<n>,
+# runs the repository's checks and pushes. The workflow then opens (or updates) the PR,
+# adds `Closes #<n>`, and moves the work to Verify.
+name: "Factory: implement"
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to implement
+        required: true
+      dispatcher:
+        description: GitHub login of the person who dispatched the work
+        required: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+
+env:
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+  ISSUE: ${{ inputs.issue || github.event.issue.number }}
+  BRANCH: factory/issue-${{ inputs.issue || github.event.issue.number }}
+  DISPATCHER: ${{ inputs.dispatcher || github.event.sender.login }}
+  FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+  FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
+  FACTORY_PUSH_TRIGGERS: ${{ vars.FACTORY_APP_ID != '' }}
+  READ_TOOLS: "Skill,Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh pr view:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(ls:*)"
+  WRITE_TOOLS: "Edit,MultiEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git switch:*),Bash(git stash:*),Bash(git restore:*),Bash(mkdir:*),Bash(rm:*),Bash(mv:*)"
+  # Commands the agent may run for tests / lint / build. Adjust to your stack.
+  CHECK_TOOLS: ${{ vars.FACTORY_CHECK_TOOLS || 'Bash(npm:*),Bash(npx:*),Bash(pnpm:*),Bash(yarn:*),Bash(node:*),Bash(python:*),Bash(pytest:*),Bash(make:*),Bash(go:*),Bash(cargo:*)' }}
+
+jobs:
+  implement:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request == null &&
+       github.event.label.name == 'factory:start' &&
+       github.event.sender.type != 'Bot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: factory-issue-${{ inputs.issue || github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      # A GitHub App token makes our pushes and PRs trigger your CI (GITHUB_TOKEN events do not).
+      - name: Factory token
+        id: app
+        if: vars.FACTORY_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Move to Implement
+        id: prepare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+        run: |
+          source .github/factory/lib.sh
+          set_stage issue "$ISSUE" factory:implement
+          remove_label issue "$ISSUE" factory:start factory:needs-human
+          add_label issue "$ISSUE" factory:running
+          git config user.name  "factory[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            git checkout -B "$BRANCH" "origin/$BRANCH"   # earlier attempt: continue from its commits
+          else
+            git checkout -b "$BRANCH"
+          fi
+          mkdir -p "$FACTORY_TMP"
+
+      # Add your toolchain here (actions/setup-node, setup-python, ...) so the agent can
+      # run the checks listed in CLAUDE.md.
+
+      - name: Implementation agent
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            factory-phase: implement
+            リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
+            作業ブランチ: ${{ env.BRANCH }}（チェックアウト済み） / ベースブランチ: ${{ env.DEFAULT_BRANCH }}
+            factory-implement スキル（.claude/skills/factory-implement/SKILL.md）に従って、このタスクを実装してください。
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_IMPLEMENT || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+            --max-turns 200
+            --allowedTools "${{ env.READ_TOOLS }},${{ env.WRITE_TOOLS }},${{ env.CHECK_TOOLS }}"
+
+      - name: Open the PR and move to Verify
+        if: always() && steps.prepare.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
+          WORKFLOW_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+        run: |
+          source .github/factory/lib.sh
+          accept_handoff issue "$ISSUE" implemented blocked
+          if [ "$VERDICT" = blocked ]; then
+            post_file issue "$ISSUE" "$FACTORY_TMP/comment.md"
+            escalate issue "$ISSUE" "実装エージェントが作業を完了できませんでした（$(field .reason)）。"
+          fi
+          git fetch -q origin "$BRANCH" || escalate issue "$ISSUE" "作業ブランチ \`$BRANCH\` がプッシュされていません。"
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH")" ] || escalate issue "$ISSUE" "ローカルのコミットがすべてプッシュされていません。"
+          [ "$(git rev-list --count "origin/$DEFAULT_BRANCH..HEAD")" -gt 0 ] || escalate issue "$ISSUE" "実装のコミットがありません。"
+          [ -s "$FACTORY_TMP/pr-body.md" ] || escalate issue "$ISSUE" "PR 本文（pr-body.md）が出力されませんでした。"
+
+          title=$(head -1 "$FACTORY_TMP/pr-title.txt" 2>/dev/null || true)
+          [ -n "$title" ] || title=$(gh issue view "$ISSUE" -R "$GITHUB_REPOSITORY" --json title -q .title)
+          { cat "$FACTORY_TMP/pr-body.md"; echo; echo "Closes #$ISSUE"; echo; echo "<!-- factory:dispatcher=$DISPATCHER -->"; } > "$FACTORY_TMP/body.md"
+
+          pr=$(gh pr list -R "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number -q '.[0].number')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" -R "$GITHUB_REPOSITORY" --title "$title" --body-file "$FACTORY_TMP/body.md" >/dev/null
+          else
+            url=$(gh pr create -R "$GITHUB_REPOSITORY" --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+                    --title "$title" --body-file "$FACTORY_TMP/body.md")
+            pr=${url##*/}
+          fi
+
+          export GH_TOKEN=$WORKFLOW_TOKEN   # labels / dispatch with the workflow token
+          add_label pr "$pr" factory
+          set_stage pr "$pr" factory:verify
+          set_stage issue "$ISSUE" factory:verify
+          remove_label issue "$ISSUE" factory:running
+          after_push "$pr"

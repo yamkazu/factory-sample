@@ -1,0 +1,124 @@
+# Backlog: intake + refinement   (SuperPlane: Ingest + backlog refinement)
+#
+# Intake      adding the `factory` label puts the issue in Backlog and starts refinement.
+# Refinement  factory-refine scores Clarity / Complexity / Verifiability (1-3) and writes
+#             the spec. Confidence = the weakest score (`confidence:1..3`).
+# Follow-up   a maintainer or the reporter comments `/factory ...` on a Backlog issue to
+#             answer questions, ask, or request a plan update (a new, fresh agent run that
+#             reads the earlier plan from the issue).
+# Dispatch    a person adds `factory:start`. With FACTORY_AUTO_DISPATCH=true, a plan with
+#             confidence 3 and no open questions starts Implement automatically.
+name: "Factory: refine"
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to refine
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+  ISSUE: ${{ inputs.issue || github.event.issue.number }}
+  FACTORY_PROJECT_NUMBER: ${{ vars.FACTORY_PROJECT_NUMBER }}
+  FACTORY_PROJECT_OWNER: ${{ vars.FACTORY_PROJECT_OWNER }}
+  READ_TOOLS: "Skill,Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh search:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*),Bash(ls:*)"
+
+jobs:
+  refine:
+    if: >-
+      github.event.issue.pull_request == null && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'issues' && github.event.label.name == 'factory' && github.event.sender.type != 'Bot') ||
+        (github.event_name == 'issue_comment' &&
+          startsWith(github.event.comment.body, '/factory') &&
+          contains(github.event.issue.labels.*.name, 'factory:backlog') &&
+          github.event.comment.user.type != 'Bot' &&
+          (github.event.comment.user.login == github.event.issue.user.login ||
+           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: factory-issue-${{ inputs.issue || github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Put the issue in Backlog
+        id: prepare
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          source .github/factory/lib.sh
+          set_stage issue "$ISSUE" factory:backlog
+          remove_label issue "$ISSUE" factory:needs-human
+          add_label issue "$ISSUE" factory:running
+          mkdir -p "$FACTORY_TMP"
+          # The follow-up comment is passed to the agent as a file, never inlined in the prompt.
+          if [ -n "$COMMENT_BODY" ]; then printf '%s\n' "$COMMENT_BODY" > "$FACTORY_TMP/human-comment.md"; fi
+          if [ -n "${{ github.event.comment.id }}" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes >/dev/null || true
+          fi
+
+      - name: Refinement agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            factory-phase: backlog-refinement
+            リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
+            ${{ github.event_name == 'issue_comment' && '人間のコメントが .factory-tmp/human-comment.md にあります。このコメントへの応答として、回答ターンか計画ターンかを判断してください。' || '最初のリファインメント（計画ターン）です。' }}
+            factory-refine スキル（.claude/skills/factory-refine/SKILL.md）に従ってください。
+          claude_args: >-
+            --model ${{ vars.FACTORY_MODEL_REFINE || vars.FACTORY_MODEL || 'claude-opus-5-5' }}
+            --max-turns 60
+            --allowedTools "${{ env.READ_TOOLS }}"
+
+      - name: Hand off
+        if: always() && steps.prepare.outcome == 'success'
+        env:
+          FACTORY_PROJECT_TOKEN: ${{ secrets.FACTORY_PROJECT_TOKEN }}
+          AUTO_DISPATCH: ${{ vars.FACTORY_AUTO_DISPATCH || 'false' }}
+          DISPATCHER: ${{ github.actor }}
+        run: |
+          source .github/factory/lib.sh
+          [ -s "$FACTORY_TMP/result.json" ] || escalate issue "$ISSUE" "リファインメントの結果（result.json）が出力されませんでした。"
+          turn=$(field .turn)
+          case "$turn" in plan|answer) ;; *) escalate issue "$ISSUE" "リファインメントの結果の形式が不正です（turn=$turn）。" ;; esac
+          [ -s "$FACTORY_TMP/comment.md" ] || escalate issue "$ISSUE" "リファインメントのコメント（comment.md）が出力されませんでした。"
+          post_file issue "$ISSUE" "$FACTORY_TMP/comment.md"
+          remove_label issue "$ISSUE" factory:running
+          [ "$turn" = plan ] || exit 0
+
+          # Confidence = the weakest of the three scores (SuperPlane derives it; the agent never does).
+          c=$(field .scores.clarity); x=$(field .scores.complexity); v=$(field .scores.verifiability)
+          for s in "$c" "$x" "$v"; do
+            case "$s" in 1|2|3) ;; *) escalate issue "$ISSUE" "スコアが 1〜3 の整数ではありません（$c / $x / $v）。" ;; esac
+          done
+          conf=$(printf '%s\n' "$c" "$x" "$v" | sort -n | head -1)
+          remove_label issue "$ISSUE" confidence:1 confidence:2 confidence:3
+          add_label issue "$ISSUE" "confidence:$conf"
+
+          questions=$(field .questions); questions=${questions:-0}
+          if [ "$conf" = 3 ] && [ "$questions" = 0 ] && [ "$AUTO_DISPATCH" = true ]; then
+            say issue "$ISSUE" "🏭 Factory: 確信度 3 のため、自動で実装を開始します。"
+            dispatch factory-implement.yml issue="$ISSUE" dispatcher="$DISPATCHER"
+          else
+            say issue "$ISSUE" "🏭 Factory: 確信度は **$conf / 3** です。実装を始めるなら \`factory:start\` ラベルを付けてください。質問への回答や計画の修正は \`/factory\` で始まるコメントで依頼できます。"
+          fi
