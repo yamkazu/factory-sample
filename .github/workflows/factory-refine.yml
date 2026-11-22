@@ -83,6 +83,7 @@ jobs:
         with:
           app-id: ${{ vars.FACTORY_APP_ID }}
           private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-metadata: read  # the token is never used
 
       - name: Refinement agent
         uses: anthropics/claude-code-action@v1

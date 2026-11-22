@@ -101,6 +101,7 @@ jobs:
         with:
           app-id: ${{ vars.FACTORY_APP_ID }}
           private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-metadata: read  # the token is never used
 
       - name: Merge confidence agent
         if: steps.creds.outputs.ok == 'true'
