@@ -130,6 +130,52 @@ Done       PR と Issue に factory:done（マージせずに閉じたら Issue 
 4. PR ができたら、マージ確信度のレポートと CI を見てレビューする。直してほしい点は `/factory 〇〇を直して` とコメントする。
 5. マージする。
 
+### 例
+
+README にライセンスの節を足す小さな Issue を、ファクトリーに通す例です。`gh` のコマンドで書いていますが、Web UI で同じ操作をしてもかまいません。
+
+Issue を作り、`factory` ラベルを付けます。
+
+```sh
+gh issue create --title "README にライセンスの節を追加する" \
+  --body "README の末尾に、MIT ライセンスであることを書いた節を追加したい。" \
+  --label factory
+```
+
+数分で、リファインメントのコメントが付きます。スコアの表と仕様が書かれ、確信度のラベル（この例では `confidence:3`）が付きます。
+
+```
+## リファインメント
+
+| Clarity | Complexity | Verifiability |
+| --- | --- | --- |
+| 3 | 3 | 3 |
+
+# README にライセンスの節を追加する
+...
+```
+
+質問があれば、`/factory` で始まるコメントで答えます。決定を伝えると、計画が更新されます。
+
+```sh
+gh issue comment 12 --body "/factory 節の見出しは「ライセンス」にしてください"
+```
+
+計画に納得したら、`factory:start` を付けて着手します。
+
+```sh
+gh issue edit 12 --add-label factory:start
+```
+
+エージェントがブランチ `factory/issue-12` で実装し、PR を作ります。PR にはマージ確信度のコメントが付きます。
+直してほしい点があれば、PR に `/factory` で始まるコメントを書きます。
+
+```sh
+gh pr comment factory/issue-12 --body "/factory 見出しのレベルを ## にそろえて"
+```
+
+レビューしてマージすると、Issue と PR に `factory:done` が付きます。
+
 ## 注意点
 
 - CI の完了待ちはランナー上でポーリングするため、待っている間も Actions の実行時間を使います。
