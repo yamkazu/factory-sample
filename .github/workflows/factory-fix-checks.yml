@@ -97,6 +97,9 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Factory steps start each other with workflow_dispatch (GITHUB_TOKEN or the App), so the
+          # actor can be a bot. Only writers can dispatch, so trust the dispatching actor.
+          allowed_bots: ${{ github.event_name == 'workflow_dispatch' && github.actor || '' }}
           prompt: |
             factory-phase: verify / fix-checks
             リポジトリ: ${{ github.repository }} / PR: #${{ inputs.pr_number }}
