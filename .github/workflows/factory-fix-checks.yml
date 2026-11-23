@@ -97,6 +97,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_bots: ${{ steps.app.outputs.app-slug && format('github-actions,{0}', steps.app.outputs.app-slug) || 'github-actions' }}
           prompt: |
             factory-phase: verify / fix-checks
             リポジトリ: ${{ github.repository }} / PR: #${{ inputs.pr_number }}

@@ -74,12 +74,23 @@ jobs:
             gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes >/dev/null || true
           fi
 
+      - name: Factory App identity
+        id: app
+        if: vars.FACTORY_APP_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-metadata: read
+
       - name: Refinement agent
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_bots: ${{ steps.app.outputs.app-slug && format('github-actions,{0}', steps.app.outputs.app-slug) || 'github-actions' }}
           prompt: |
             factory-phase: backlog-refinement
             リポジトリ: ${{ github.repository }} / Issue: #${{ env.ISSUE }}
