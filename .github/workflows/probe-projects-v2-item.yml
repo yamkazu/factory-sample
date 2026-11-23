@@ -1,0 +1,14 @@
+name: probe-projects-v2-item
+
+on:
+  projects_v2_item:
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          EVENT: ${{ toJSON(github.event) }}
+        run: |
+          echo "event_name=${{ github.event_name }} action=${{ github.event.action }}"
+          echo "$EVENT" | jq .

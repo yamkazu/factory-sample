@@ -1,0 +1,15 @@
+name: probe-issue-events
+
+on:
+  issues:
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          EVENT: ${{ toJSON(github.event) }}
+        run: |
+          echo "event_name=${{ github.event_name }} action=${{ github.event.action }} issue=#${{ github.event.issue.number }}"
+          echo "$EVENT" | jq 'del(.repository, .sender, .issue.user, .issue.reactions)'
+          echo "### ${{ github.event_name }} / ${{ github.event.action }}" >> "$GITHUB_STEP_SUMMARY"
